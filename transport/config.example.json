@@ -1,0 +1,23 @@
+{
+  "listen_host": "127.0.0.1",
+  "listen_port": 8795,
+  "db_path": "/home/juliann/pr-reviewer/transport/state/jobs.db",
+  "jobs_root": "/home/juliann/pr-reviewer/transport/state/jobs",
+  "input_bind_root": "/home/juliann/pr-reviewer/fixtures/input/jobs",
+  "worker_container": "fb-vps",
+  "worker_image": "freebuff-reviewer:0.1.0",
+  "auth_volume": "fb-vps-auth",
+  "state_volume": "fb-vps-state",
+  "out_volume": "fb-vps-output",
+  "model_requested": "meta/muse-spark-1.3-contributor",
+  "events": ["opened", "reopened", "ready_for_review", "synchronize"],
+  "repos": ["Revens2/agent-island"],
+  "draft_repos": [],
+  "author_associations": ["OWNER", "MEMBER", "COLLABORATOR"],
+  "pr_branch_prefixes": [],
+  "max_retries": 3,
+  "timeout_s": 1200,
+  "poll_interval_s": 45,
+  "freebucks_low": 10,
+  "check_name": "Muse Semantic Review"
+}

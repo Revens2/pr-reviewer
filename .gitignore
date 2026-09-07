@@ -1,0 +1,31 @@
+# Secrets / credentials — JAMAIS versionnés
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+gho_*
+ghp_*
+github_pat_*
+
+# Runtime local (transport)
+transport/state/
+transport/config.json
+transport/__pycache__/
+*.pyc
+state/
+
+# Fixtures générées (contiennent des .git embarqués)
+fixtures/input/
+
+# Résultats / preuves / logs runtime
+results/
+recon/
+*.db
+*.db-*
+*.log
+tmp/
+
+# Divers
+.DS_Store

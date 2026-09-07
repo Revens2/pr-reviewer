@@ -1,0 +1,51 @@
+# Sandbox reviewer Freebuff.
+# - Profil "dev" (local, itératif) : compose up --profile dev
+# - Production : docker run par job (voir commentaire en fin de Dockerfile),
+#   concurrency=1 via flock côté orchestrateur, volumes partagés fb-auth/fb-state.
+name: freebuff-reviewer
+
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: freebuff-reviewer:0.1.0
+    container_name: freebuff-reviewer-dev
+    hostname: freebuff-reviewer-dev
+    init: true
+    read_only: true
+    user: "3741:3741"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 1536m
+    cpus: 2.0
+    tmpfs:
+      # exec requis : OpenTUI dlopen un .so depuis le tmpdir (tmpfs = noexec par défaut).
+      - /tmp:rw,size=256m,mode=1777,exec
+    volumes:
+      - fb-auth:/home/reviewer/.config/manicode
+      - fb-freebuff:/home/reviewer/.freebuff
+      - fb-output:/reviewer/out
+      # Snapshot à reviewer (lecture seule en production ; volume dédié ici pour le dev).
+      - fb-input:/reviewer/pr
+      - type: bind
+        source: ./orchestrator
+        target: /reviewer/orchestrator
+    environment:
+      - HOME=/home/reviewer
+      - TERM=xterm-256color
+    profiles: ["dev"]
+    command: ["sleep", "infinity"]
+
+volumes:
+  fb-auth:
+    name: freebuff-reviewer-auth
+  fb-freebuff:
+    name: freebuff-reviewer-state
+  fb-output:
+    name: freebuff-reviewer-output
+  fb-input:
+    name: freebuff-reviewer-input

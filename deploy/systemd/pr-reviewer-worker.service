@@ -1,0 +1,29 @@
+# pr-reviewer-worker.service — worker concurrency=1 : queue SQLite → fb-vps (Muse)
+# → verdict certifié → commit status « Muse Semantic Review » (advisory, jamais required).
+# Nécessite : accès docker (groupe docker) pour piloter le conteneur fb-vps existant.
+[Unit]
+Description=pr-reviewer worker (queue SQLite → Freebuff/Muse certifié → commit status)
+Documentation=https://github.com/Revens2/pr-reviewer
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=juliann
+Group=docker
+WorkingDirectory=/home/juliann/pr-reviewer/transport
+# Fichier PLAIN (sans préfixe `export `) généré depuis state/.env (600) :
+# systemd ignore les lignes `export K=V` et journalise la valeur (fuite locale).
+EnvironmentFile=/home/juliann/pr-reviewer/transport/state/systemd.env
+ExecStart=/usr/bin/python3 /home/juliann/pr-reviewer/transport/worker.py
+Restart=on-failure
+RestartSec=15
+Nice=5
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pr-reviewer-worker
+
+[Install]
+WantedBy=multi-user.target
