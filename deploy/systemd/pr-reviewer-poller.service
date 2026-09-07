@@ -1,19 +1,17 @@
 # pr-reviewer-poller.service — poller GitHub advisory (mode réel, aucun webhook).
-# L'entrypoint charge state/.env lui-même (défense en profondeur) ; EnvironmentFile
-# reste fourni explicitement. Concurrency assurée : une seule unité par rôle.
+# HARDENING 2026-09-07 : tourne sous l'utilisateur prreview (sans docker, sans sudo
+# nécessaire — purement API GitHub read-only). L'entrypoint self-load .env.
 [Unit]
 Description=pr-reviewer poller (GitHub advisory — same-repo, non-draft, auteur autorisé)
 Documentation=https://github.com/Revens2/pr-reviewer
-After=docker.service network-online.target
+After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=juliann
-Group=docker
+User=prreview
+Group=prreview
 WorkingDirectory=/home/juliann/pr-reviewer/transport
-# Fichier PLAIN (sans préfixe `export `) généré depuis state/.env (600) :
-# systemd ignore les lignes `export K=V` et journalise la valeur (fuite locale).
 EnvironmentFile=/home/juliann/pr-reviewer/transport/state/systemd.env
 ExecStart=/usr/bin/python3 /home/juliann/pr-reviewer/transport/poller.py
 Restart=on-failure
@@ -21,7 +19,6 @@ RestartSec=15
 Nice=5
 NoNewPrivileges=true
 PrivateTmp=true
-# stdout → journald (pas de doublon de log)
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=pr-reviewer-poller

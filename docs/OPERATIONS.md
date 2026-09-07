@@ -1,8 +1,8 @@
 # Opérations — pr-reviewer (service long-running, mode advisory réel)
 
-Service VPS : deux unités systemd (`pr-reviewer-poller`, `pr-reviewer-worker`), exécutées par un
-utilisateur non-root membre du groupe docker (pilotage du conteneur `fb-vps` existant — jamais de
-nouveau privilège host). L'entrypoint charge `state/.env` lui-même (défense en profondeur).
+Service VPS : deux unités systemd (`pr-reviewer-poller`, `pr-reviewer-worker`) sous l'utilisateur
+`prreview` (**sans** groupe docker — docker piloté via le wrapper ROOT `pr-reviewer-docker`, voir
+`docs/HARDENING.md`). L'entrypoint charge `state/.env` lui-même (défense en profondeur).
 
 ## Références opératoires
 
@@ -14,12 +14,16 @@ nouveau privilège host). L'entrypoint charge `state/.env` lui-même (défense e
 | Statut | `systemctl status pr-reviewer-poller pr-reviewer-worker` ; `systemctl is-active pr-reviewer-*` |
 | Logs | `journalctl -u pr-reviewer-worker -f` ; `journalctl -u pr-reviewer-poller -n 100` |
 | Santé | `python3 transport/health.py` (JSON : poller, worker, queue, github, fb-vps, disque — exit 0/1) |
+| Rapport advisory | `python3 transport/report.py --since 7d` (read-only, aucun quota) |
+| Required-readiness | `python3 transport/readiness.py` (NOT_ENOUGH_DATA/NOT_READY/CANDIDATE_READY) |
+| Label un finding | `python3 transport/feedback.py label <job_id> <idx> <confirmed|false_positive|unclear|not_reviewed>` |
 | Inspecter la file | `python3 -c "import sqlite3;print(sqlite3.connect('transport/state/jobs.db').execute('select state,count(*) from jobs group by state').fetchall())"` |
 | Relancer un job | `python3 -c "import sqlite3,time;c=sqlite3.connect('transport/state/jobs.db');c.execute(\"update jobs set state='pending',next_run=0 where id='<id>'\");c.commit()"` |
 | Purger jobs terminés | `python3 -c "import sqlite3;c=sqlite3.connect('transport/state/jobs.db');print(c.execute(\"delete from jobs where state in ('done','error')\").rowcount);c.commit()"` |
 
-Les fichiers d'état vivent sous `transport/state/` : `jobs.db` (file SQLite), `jobs/<jid>/`
-(verdicts, preuves par review), `*.heartbeat` (liveness), `metrics/*.jsonl` (observabilité),
+Les fichiers d'état vivent sous `transport/state/` (propriété `prreview:prreview`, 2775/664 —
+l'opérateur `juliann` y accède via le groupe `prreview`) : `jobs.db` (file SQLite), `jobs/<jid>/`
+(verdicts, preuves par review), `*.heartbeat` (liveness), `feedback.jsonl` (labels humains),
 `balance.json` (solde Muse observé). Aucun secret dans ces fichiers de métriques.
 
 ## Déploiement / màj de code
@@ -49,6 +53,21 @@ sur l'UI TUI (jamais interrogé ailleurs) et écrit dans `state/balance.json`.
 
 ## Rollback
 
-`sudo systemctl stop pr-reviewer-poller pr-reviewer-worker` suffit : plus aucune review, aucune PR
-touchée, aucun repo/ruleset/Action/service modifié. Les commentaires/status déjà publiés restent
-(historiques). Aucun credential n'est supprimé.
+1. **Arrêt fonctionnel du reviewer** : `sudo systemctl stop pr-reviewer-poller
+   pr-reviewer-worker` — plus aucune review, aucune PR touchée, aucun repo/ruleset/Action/service
+   modifié. Les commentaires/status déjà publiés restent (historiques). Aucun credential supprimé.
+2. **Rollback complet du durcissement** (retour aux unités `User=juliann Group=docker`) :
+   `deploy/rollback_juliann.sh` en root (helper docker-nsenter) — restaure les unités depuis
+   `deploy/backup-units-juliann/` et retire `sudoers.d/pr-reviewer`. Drill exécuté et validé le
+   2026-09-07 (rollback → re-durcissement, service resté vert).
+3. Redémarrage après màj de code : `sudo systemctl restart pr-reviewer-poller pr-reviewer-worker`
+   puis `python3 transport/health.py` → `"status": "ok"`.
+
+## Journal des pannes connues (suite)
+
+- `ENV_LEAK` (incident 2026-09-07, corrigé) : lignes `export K=V` dans l'EnvironmentFile systemd
+  rejetées ET journalisées en clair (fuite locale). Fix : `state/systemd.env` sans préfixe
+  `export` (sed), chmod 600, purge journal (`journalctl --rotate` + `--vacuum-time=1s`),
+  vérification 0 occurrence.
+- Durcissement : wrapper refuse toute commande docker hors `start`/`exec`/`inspect-running` sur
+  `fb-vps` (exit 3) — validé en prod (DENY `rm fb-vps`).

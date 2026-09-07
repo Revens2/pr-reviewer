@@ -80,7 +80,8 @@ def scan_once(con):
             title = (pr.get("title") or "")[:200]
             if not (head_sha and base_sha):
                 continue
-            is_new, _ = qdb.enqueue(con, repo, number, base_sha, head_sha, title)
+            is_new, _ = qdb.enqueue(con, repo, number, base_sha, head_sha, title,
+                                   head_ref=head_ref, author_association=assoc)
             if is_new:
                 created += 1
                 log("enqueued", repo=repo, pr=number, head=head_sha[:12])

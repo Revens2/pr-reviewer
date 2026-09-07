@@ -12,6 +12,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   pr INTEGER NOT NULL,
   base_sha TEXT NOT NULL,
   head_sha TEXT NOT NULL,
+  head_ref TEXT DEFAULT '',                 -- branche head (fixture vs réelle)
+  author_association TEXT DEFAULT '',       -- OWNER/MEMBER/COLLABORATOR/CONTRIBUTOR...
   title TEXT DEFAULT '',
   state TEXT NOT NULL DEFAULT 'pending',   -- pending|running|retry|done|error
   retries INTEGER NOT NULL DEFAULT 0,
@@ -26,7 +28,14 @@ CREATE TABLE IF NOT EXISTS jobs (
   check_run_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
+CREATE INDEX IF NOT EXISTS idx_jobs_done ON jobs(state, finished_at);
 """
+
+_MIGRATIONS = {
+    # base existante (créée avant observabilité advisory) → colonnes ajoutées.
+    "head_ref": "ALTER TABLE jobs ADD COLUMN head_ref TEXT DEFAULT ''",
+    "author_association": "ALTER TABLE jobs ADD COLUMN author_association TEXT DEFAULT ''",
+}
 
 
 def connect(db_path):
@@ -35,15 +44,24 @@ def connect(db_path):
     con = sqlite3.connect(db_path, timeout=30)
     con.row_factory = sqlite3.Row
     con.executescript(SCHEMA)
+    _migrate(con)
     con.commit()
     return con
+
+
+def _migrate(con):
+    """Ajoute les colonnes manquantes d'une base préexistante (idempotent)."""
+    cols = {r["name"] for r in con.execute("PRAGMA table_info(jobs)").fetchall()}
+    for name, ddl in _MIGRATIONS.items():
+        if name not in cols:
+            con.execute(ddl)
 
 
 def job_id(repo, pr, head_sha):
     return f"{repo}|{pr}|{head_sha}"
 
 
-def enqueue(con, repo, pr, base_sha, head_sha, title=""):
+def enqueue(con, repo, pr, base_sha, head_sha, title="", head_ref="", author_association=""):
     """Insert si absent (dédup repo|pr|head_sha).
 
     Tout état existant (pending/running/retry/done/error) → dédup : jamais de
@@ -59,8 +77,9 @@ def enqueue(con, repo, pr, base_sha, head_sha, title=""):
     if existing:
         return False, existing
     con.execute(
-        "INSERT INTO jobs (id,repo,pr,base_sha,head_sha,title,state,created_at) VALUES (?,?,?,?,?,?,'pending',?)",
-        (jid, repo, pr, base_sha, head_sha, title, now))
+        "INSERT INTO jobs (id,repo,pr,base_sha,head_sha,head_ref,author_association,title,state,created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,'pending',?)",
+        (jid, repo, pr, base_sha, head_sha, head_ref, author_association, title, now))
     con.commit()
     return True, con.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone()
 

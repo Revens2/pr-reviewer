@@ -19,7 +19,7 @@ jobs:
       - name: Compile
         run: python -m py_compile transport/*.py reviewer/orchestrator/*.py
       - name: Unit tests (offline, no model quota)
-        run: python -m unittest tests.transport_test
+        run: python -m unittest tests.transport_test tests.hardening_test
 
   secret-scan:
     runs-on: ubuntu-latest

@@ -63,7 +63,7 @@ def heartbeat():
 
 
 def sh(cmd, timeout=60, input_text=None, check=False):
-    """Exécute localement (docker CLI). Retourne (rc, stdout, stderr)."""
+    """Exécute localement (docker CLI via boundary durcie). Retourne (rc, stdout, stderr)."""
     p = subprocess.run(cmd, shell=True, capture_output=True, text=True,
                        timeout=timeout, input=input_text)
     if check and p.returncode != 0:
@@ -71,9 +71,28 @@ def sh(cmd, timeout=60, input_text=None, check=False):
     return p.returncode, p.stdout, p.stderr
 
 
+# Boundary docker : par défaut CLI docker (environnements de test / user docker group) ;
+# en production l'unité systemd pose PR_REVIEWER_DOCKER_WRAPPER=/usr/local/sbin/
+# pr-reviewer-docker et le worker (utilisateur SANS groupe docker) passe par le
+# wrapper root qui ne valide que les opérations fb-vps strictes (docker_guard).
+def docker_cmdline(verb, args):
+    """Ligne shell du prefix docker pour un verbe (exec|start|inspect-running).
+    `args` = chaîne déjà quotée par les appelants (comportement historique)."""
+    wrapper = os.environ.get("PR_REVIEWER_DOCKER_WRAPPER")
+    if wrapper:
+        # wrapper root strict : verbe + args bruts (validés côté wrapper)
+        return f"sudo -n {wrapper} {verb} {args}".rstrip()
+    base = {
+        "exec": "docker exec -i -u reviewer fb-vps",
+        "start": "docker start fb-vps",
+        "inspect-running": "docker inspect -f '{{.State.Running}}' fb-vps",
+    }[verb]
+    return (base + " " + args).rstrip() if args else base
+
+
 def docker_exec(args, timeout=120, input_text=None):
     """docker exec -i -u reviewer fb-vps <args>  (-i : stdin pour les lectures/envois)."""
-    return sh("docker exec -i -u reviewer fb-vps " + args, timeout=timeout, input_text=input_text)
+    return sh(docker_cmdline("exec", args), timeout=timeout, input_text=input_text)
 
 
 def pane():
@@ -82,7 +101,7 @@ def pane():
 
 
 def docker_start():
-    rc, _, err = sh("docker start fb-vps", timeout=60)
+    rc, _, err = sh(docker_cmdline("start", ""), timeout=60)
     if rc != 0 and "already started" not in err:
         raise RuntimeError(f"docker start fb-vps: {err[-300:]}")
     time.sleep(2)
@@ -471,6 +490,14 @@ def reconcile_running(con, get_head=None):
                      last_error="running orphelin au restart — head changé")
 
 
+def _severity_counts(verdict):
+    counts = {"critical": 0, "major": 0, "minor": 0, "info": 0}
+    for f in verdict.get("findings") or []:
+        sev = (f.get("severity") or "info").lower()
+        counts[sev] = counts.get(sev, 0) + 1
+    return counts
+
+
 def _metrics(job, action):
     """Une ligne JSON par job terminé (jamais de secret/token). action:
     {'kind':'done','verdict':..} | {'kind':'error','error_class':..,'last_error':..}"""
@@ -482,16 +509,22 @@ def _metrics(job, action):
         started = row["started_at"] or created
         finished = row["finished_at"] or time.time()
         verdict = action.get("verdict") or {}
+        sev = _severity_counts(verdict)
         line = {
             "ts": time.time(), "repo": job["repo"], "pr": job["pr"],
-            "head_sha": job["head_sha"], "job_id": job["id"],
+            "head_sha": job["head_sha"], "head_ref": row["head_ref"] or "",
+            "author_association": row["author_association"] or "",
+            "job_id": job["id"],
             "queue_delay_s": round(started - created, 1),
             "review_duration_s": round(finished - started, 1),
             "total_latency_s": round(finished - created, 1),
-            "model": verdict.get("model_verified") or verdict.get("model_requested"),
+            "model_requested": verdict.get("model_requested"),
+            "model_verified": verdict.get("model_verified"),
             "model_certified": bool(verdict.get("model_certified")),
             "verdict": verdict.get("status"),
-            "findings_count": len(verdict.get("findings") or []),
+            "critical_count": sev["critical"], "major_count": sev["major"],
+            "minor_count": sev["minor"], "info_count": sev["info"],
+            "findings_count": sum(sev.values()),
             "retry_count": row["retries"] or 0,
             "takeover_recovery_count": _TAKEOVERS,
             "error_class": None if action["kind"] == "done" else action.get("error_class"),
@@ -510,7 +543,7 @@ def snapshot_job(job, out_root):
     jid = safe_token(job["id"])
     case = pathlib.Path(CFG["input_bind_root"]) / jid
     if case.exists():
-        subprocess.run(f"chmod -R u+w {case}", shell=True)  # snapshots a-w précédents
+        subprocess.run(["chmod", "-R", "u+w", str(case)], check=False)  # snapshots a-w précédents
         shutil.rmtree(case, ignore_errors=True)
     repo_dir = case / "repository"
     repo_dir.mkdir(parents=True)
@@ -520,9 +553,12 @@ def snapshot_job(job, out_root):
     req = u.Request(f"https://api.github.com/repos/{job['repo']}/tarball/{job['head_sha']}",
                     headers={"Authorization": f"token {tok}", "User-Agent": "pr-reviewer-transport"})
     tar = case / "head.tar.gz"
+    # URL à schéma FIXE https://api.github.com ; repo|head_sha = métadonnées GitHub de
+    # PR internes (même repo, OWNER) — transport stdlib-only par conception.
+    # nosemgrep
     with u.urlopen(req, timeout=300) as r, open(tar, "wb") as fh:
         shutil.copyfileobj(r, fh)
-    subprocess.run(f"tar xzf {tar} -C {repo_dir} --strip-components=1", shell=True, check=True)
+    subprocess.run(["tar", "xzf", str(tar), "-C", str(repo_dir), "--strip-components=1"], check=True)
     tar.unlink()
     cmp = gh.get_compare(job["repo"], job["base_sha"], job["head_sha"])
     (case / "change.patch").write_text(cmp["patch"] or "(empty diff)")
@@ -530,14 +566,14 @@ def snapshot_job(job, out_root):
            "head_sha": job["head_sha"], "title": job["title"], "files_changed": cmp["files"],
            "diff_truncated": cmp["truncated"]}
     (case / "context.json").write_text(json.dumps(ctx, indent=2))
-    subprocess.run(f"chmod -R a-w {repo_dir}", shell=True)
+    subprocess.run(["chmod", "-R", "a-w", str(repo_dir)], check=False)
     return case
 
 
 def cleanup_case(job):
     case = pathlib.Path(CFG["input_bind_root"]) / safe_token(job["id"])
     if case.exists():
-        subprocess.run(f"chmod -R u+w {case}", shell=True)
+        subprocess.run(["chmod", "-R", "u+w", str(case)], check=False)
         shutil.rmtree(case, ignore_errors=True)
 
 

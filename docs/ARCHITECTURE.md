@@ -1,13 +1,15 @@
 # Architecture — Reviewer de PR indépendant Freebuff/Muse Spark
 
-> **MISE À JOUR 2026-09-07** : intégration GitHub terminée — architecture retenue = **poller GitHub
-> + commit status** (option B), pas de GitHub App ni webhook public ni runner Actions. Le transport
-> `transport/poller.py` (45 s, READ-ONLY) alimente la queue SQLite existante ; le worker publie un
-> commit status « Muse Semantic Review » + commentaire BLOCK. E2E A/B/C réel prouvé. Rapport final :
-> `docs/RAPPORT-FINAL-20260907.md`. Le receiver webhook ci-dessous reste disponible (non utilisé).
+> **MISE À JOUR 2026-09-07 (durcissement + observabilité)** : architecture = **poller GitHub (45 s,
+> READ-ONLY) + queue SQLite + worker → fb-vps → commit status « Muse Semantic Review »**, advisory
+> réel sur `Revens2/agent-island`. Composants ajoutés : `docker_guard.py` (boundary docker), wrapper
+> ROOT `pr-reviewer-docker` (worker `prreview` sans groupe docker), `observe.py`/`report.py`/
+> `readiness.py`/`feedback.py` (métriques advisory). Preuves : E2E A/B/C + PR #1 réelle (BLOCK
+> certifié 7 findings) — `docs/RAPPORT-FINAL-20260907.md`, `docs/HARDENING.md`,
+> `docs/ADVISORY-METRICS.md`. Le receiver webhook ci-dessous reste disponible (non utilisé).
 
-Date : 2026-09-06. Statut : **POC validé localement (x64)** ; portage VPS ARM64 + intégration
-GitHub = phases suivantes non exécutées.
+Date : 2026-09-06 (base POC). Statut courant : **ADVISORY PRODUCTION RUNNING, durci** — voir les
+mise à jour ci-dessus pour l'état live.
 
 ## Vue d'ensemble
 

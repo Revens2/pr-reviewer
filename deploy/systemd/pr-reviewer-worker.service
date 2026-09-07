@@ -1,6 +1,10 @@
 # pr-reviewer-worker.service — worker concurrency=1 : queue SQLite → fb-vps (Muse)
 # → verdict certifié → commit status « Muse Semantic Review » (advisory, jamais required).
-# Nécessite : accès docker (groupe docker) pour piloter le conteneur fb-vps existant.
+#
+# HARDENING 2026-09-07 : l'utilisateur prreview n'a PAS le groupe docker (plus aucun
+# accès root-equivalent). Les opérations docker passent par le wrapper ROOT
+# /usr/local/sbin/pr-reviewer-docker (sudo NOPASSWD limité à ce binaire) qui ne
+# valide que start/exec/inspect-running sur le conteneur FIXE fb-vps (docker_guard).
 [Unit]
 Description=pr-reviewer worker (queue SQLite → Freebuff/Muse certifié → commit status)
 Documentation=https://github.com/Revens2/pr-reviewer
@@ -9,17 +13,20 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=juliann
-Group=docker
+User=prreview
+Group=prreview
 WorkingDirectory=/home/juliann/pr-reviewer/transport
-# Fichier PLAIN (sans préfixe `export `) généré depuis state/.env (600) :
-# systemd ignore les lignes `export K=V` et journalise la valeur (fuite locale).
 EnvironmentFile=/home/juliann/pr-reviewer/transport/state/systemd.env
+Environment=PR_REVIEWER_DOCKER_WRAPPER=/usr/local/sbin/pr-reviewer-docker
 ExecStart=/usr/bin/python3 /home/juliann/pr-reviewer/transport/worker.py
 Restart=on-failure
 RestartSec=15
 Nice=5
-NoNewPrivileges=true
+# NB: PAS de NoNewPrivileges ici — le worker (User=prreview, sans groupe docker)
+# doit pouvoir `sudo -n /usr/local/sbin/pr-reviewer-docker` (règle sudoers EXACTE).
+# NoNewPrivileges=true inhiberait setuid sudo et casserait la boundary docker.
+# L'élévation est bornée : sudoers ne permet QUE ce wrapper root, qui ne valide
+# que start/exec/inspect-running sur le conteneur FIXE fb-vps (docker_guard).
 PrivateTmp=true
 StandardOutput=journal
 StandardError=journal

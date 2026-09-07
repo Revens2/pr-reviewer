@@ -1,0 +1,37 @@
+#!/usr/bin/python3
+"""pr-reviewer-docker — wrapper ROOT minimal pour les opérations docker du
+worker pr-reviewer (utilisateur prreview SANS groupe docker).
+
+Seules les opérations fb-vps validées par docker_guard sont possibles :
+  start | exec <cmd…> | inspect-running
+Tout le reste → refus (exit 3). Le fichier vit dans /usr/local/sbin (root:root,
+non modifiable par le worker). La logique de validation est dans
+/usr/local/lib/pr_reviewer_docker_guard.py (copie installée du module versionné
+transport/docker_guard.py) — jamais importée depuis le home du worker.
+"""
+import os
+import sys
+
+sys.path.insert(0, "/usr/local/lib")
+try:
+    from pr_reviewer_docker_guard import GuardError, docker_argv
+except Exception as e:  # garde-fou : jamais d'exec docker sans guard
+    print(f"pr-reviewer-docker: FATAL guard indisponible: {e}", file=sys.stderr)
+    sys.exit(3)
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("pr-reviewer-docker: usage: start|exec <cmd…>|inspect-running", file=sys.stderr)
+        return 3
+    try:
+        cmd = docker_argv(sys.argv[1], sys.argv[2:])
+    except GuardError as e:
+        print(f"pr-reviewer-docker: DENIED: {e}", file=sys.stderr)
+        return 3
+    os.execvp(cmd[0], cmd)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

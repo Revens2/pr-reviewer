@@ -104,7 +104,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             con = qdb.connect(CFG["db_path"])
-            created, row = qdb.enqueue(con, repo, number, base_sha, head_sha, pr.get("title", ""))
+            created, row = qdb.enqueue(con, repo, number, base_sha, head_sha,
+                                       pr.get("title", ""),
+                                       head_ref=(pr.get("head") or {}).get("ref", ""),
+                                       author_association=pr.get("author_association", ""))
             con.close()
         except Exception as e:
             self._json(500, {"ok": False, "reason": str(e)[:200]})

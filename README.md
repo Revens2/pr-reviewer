@@ -32,19 +32,24 @@ un problème ne devient jamais `success`).
 
 | Chemin | Contenu |
 |---|---|
-| `transport/` | Orchestrateur : `poller.py`, `worker.py`, `db.py` (queue SQLite), `github_client.py`, `envfile.py`, `health.py`, `receiver.py` (webhook optionnel, non utilisé) |
+| `transport/` | Orchestrateur : `poller.py`, `worker.py`, `db.py` (queue SQLite), `github_client.py`, `envfile.py`, `docker_guard.py`, `health.py`, `observe.py`/`report.py`/`readiness.py`/`feedback.py` (observabilité advisory), `receiver.py` (webhook optionnel, non utilisé) |
 | `reviewer/` | Image Docker sandbox + instructions trusted `AGENTS.md` + skill `pr-review` + scripts orchestrator (driver tmux, probe modèle, assemble verdict) |
-| `tests/` | Tests offline (aucun quota modèle) |
-| `deploy/systemd/` | Unités service `pr-reviewer-poller` / `pr-reviewer-worker` |
+| `tests/` | Tests offline (aucun quota modèle) : `transport_test.py` + `hardening_test.py` |
+| `deploy/systemd/` | Unités service durcies `pr-reviewer-poller` / `pr-reviewer-worker` |
+| `deploy/root-wrapper/` | Wrapper ROOT `pr-reviewer-docker` (boundary docker, voir `docs/HARDENING.md`) |
+| `deploy/harden_vps.sh` / `deploy/rollback_juliann.sh` | Durcissement + rollback (root) |
 | `fixtures/` | Générateur de fixtures de test |
-| `docs/` | ARCHITECTURE, SECURITY, OPERATIONS, RAPPORT-FINAL, REQUIRED-GATE |
+| `docs/` | ARCHITECTURE, SECURITY, OPERATIONS, HARDENING, ADVISORY-METRICS, REQUIRED-GATE, RAPPORT-FINAL |
 
 ## Prérequis (VPS cible)
 
-- Docker (daemon rootful ou accessible), un compte pour les services (groupe docker).
-- Conteneur `fb-vps` = image `reviewer/` avec une session Freebuff authentifiée (volume d'auth).
-- Credential GitHub : PAT classique `repo` (lecture PR + statuses + commentaires). Jamais dans
-  le repo : voir `.env.example` + `docs/SECURITY.md`.
+- Docker (daemon rootful), conteneur `fb-vps` = image `reviewer/` avec une session Freebuff
+  authentifiée (volume d'auth).
+- **Durcissement (recommandé)** : déploiement `deploy/harden_vps.sh` → service sous utilisateur
+  `prreview` **sans** groupe docker, docker piloté via le wrapper ROOT `pr-reviewer-docker`
+  (seulement `start`/`exec`/`inspect` sur le conteneur fixe `fb-vps`). Voir `docs/HARDENING.md`.
+- Credential GitHub : PAT classique `repo` (lecture PR + statuses + commentaires) ; migration
+  fine-grained documentée dans `docs/SECURITY.md`. Jamais dans le repo : voir `.env.example`.
 
 ## Démarrage rapide
 
@@ -58,15 +63,18 @@ sudo cp deploy/systemd/pr-reviewer-*.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now pr-reviewer-poller pr-reviewer-worker
 
 python3 transport/health.py            # santé structurée JSON (jamais de session Muse)
+python3 transport/report.py --since 7d # rapport advisory (lecture seule)
+python3 transport/readiness.py        # NOT_ENOUGH_DATA / NOT_READY / CANDIDATE_READY
 ```
 
 Rollback : `sudo systemctl stop pr-reviewer-poller pr-reviewer-worker` — n'interrompt que le
-reviewer ; aucune PR, aucun repo, aucun runner ni service applicatif n'est touché.
+reviewer ; aucune PR, aucun repo, aucun runner ni service applicatif n'est touché. Rollback du
+durcissement (retour unités `juliann` + groupe docker) : `deploy/rollback_juliann.sh` (root).
 
 ## Tests
 
 ```bash
-python3 -m unittest tests.transport_test   # queue/gates/verdicts/reconcile/quota (25)
+python3 -m unittest tests.transport_test tests.hardening_test  # queue/gates/verdicts/reconcile/quota/guard/readiness (34)
 bash tests/test_offline.sh                 # driver FAKE_TUI + assemble + adversarial (image locale)
 ```
 
