@@ -112,6 +112,23 @@ class TestObserve(unittest.TestCase):
         self.assertEqual(agg["severity"]["minor"], 1)
         self.assertIsNotNone(agg["latency_p50"])
 
+    def test_aggregate_by_repo(self):
+        # dimension repository : les jobs restent agrégés sous leur propre repo
+        finished_job("Revens2/repo-a", 1, "h" * 40, head_ref="feat/x", status="BLOCK",
+                     findings=[{"severity": "major"}])
+        finished_job("Revens2/repo-a", 2, "g" * 40, head_ref="feat/y", status="PASS")
+        finished_job("Revens2/repo-b", 1, "f" * 40, head_ref="feat/z", status="PASS")
+        finished_job("Revens2/repo-b", 2, "e" * 40, head_ref="test/fix", status="PASS")
+        jobs = observe.load_jobs(self.dbp, 0.0)
+        import report as rp
+        agg = rp.aggregate(jobs)
+        a = agg["by_repo"]["Revens2/repo-a"]
+        b = agg["by_repo"]["Revens2/repo-b"]
+        self.assertEqual((a["total"], a["pass"], a["block"]), (2, 1, 1))
+        self.assertEqual((b["total"], b["pass"], b["block"]), (2, 2, 0))
+        self.assertEqual((a["fixture"], b["fixture"]), (0, 1))
+        self.assertEqual(agg["by_repo"].keys(), {"Revens2/repo-a", "Revens2/repo-b"})
+
 
 class TestReadiness(unittest.TestCase):
     def setUp(self):

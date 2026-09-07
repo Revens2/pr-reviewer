@@ -43,15 +43,19 @@ jamais appelé** par le transport commit-status.
   affichée) : `repo, workflow, gist, read:packages, read:org` — `repo` couvre le besoin mais
   `workflow`/`gist`/`read:packages`/`read:org` sont **superflus** pour pr-reviewer. Ne pas révoquer
   un token partagé sans identifier ses autres consommateurs.
-- **Cible** : fine-grained PAT dédié, accès repo `Revens2/agent-island` uniquement, permissions :
-  `Metadata: read` (implicite), `Contents: read`, `Pull requests: read+write`, `Commit statuses:
-  read+write`. Aucune autre.
+- **Cible** : fine-grained PAT dédié couvrant **chaque repo de l'allowlist multi-repo**
+  (`config.json → repos`) — permissions : `Metadata: read` (implicite), `Contents: read`,
+  `Pull requests: read+write`, `Commit statuses: read+write`. Aucune autre.
 - **Gate UI** : GitHub ne permet PAS de créer un fine-grained PAT par API — création manuelle dans
   l'UI (Settings → Developer settings → Fine-grained tokens). Procédure exacte : nom
-  `pr-reviewer-transport`, repository access = *Only select repositories* → `Revens2/agent-island`,
-  permissions ci-dessus, expiration courte. Dépôt : remplacer la valeur dans
+  `pr-reviewer-transport`, repository access = *Only select repositories* → sélectionner les repos
+  de l'allowlist, permissions ci-dessus, expiration courte. Dépôt : remplacer la valeur dans
   `transport/state/.env` (`GH_TRANSPORT_TOKEN`) puis `systemctl restart pr-reviewer-worker
   pr-reviewer-poller` + `health.py`. Ne jamais coller le token dans un chat/log.
+- **OPTIONAL_HARDENING_PENDING** : le runtime actuel utilise le PAT classique préexistant (scope
+  `repo`) — opérationnel et couvrant les repos privés de l'allowlist. La migration fine-grained
+  multi-repo décrite ci-dessus est un durcissement optionnel, non bloquant ; aucun credential
+  partagé n'est révoqué.
 - Jamais de `cat`/`env` de token dans les procédures ; les vérifications ne montrent que la présence.
 
 ## Leçon intégrée (fuite locale)

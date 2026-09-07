@@ -273,6 +273,103 @@ class TestPoller(unittest.TestCase):
         self.assertEqual(c, 1)
 
 
+class TestPollerMultiRepo(unittest.TestCase):
+    """scan_once multi-repo : allowlist explicite, isolation repo|PR|SHA, gates
+    fork/draft appliqués par repo. Repos neutres (aucune hypothèse agent-island).
+    Aucun réseau : github_client stubé, pulls par repo."""
+
+    REPOS = ["Revens2/pr-reviewer", "Revens2/homelab-ops"]
+
+    def setUp(self):
+        import types
+        self.dbp = pathlib.Path(TMP) / f"mr{time.time_ns()}.db"
+        self.con = qdb.connect(self.dbp)
+        fake = types.ModuleType("github_client")
+        self.by_repo = {r: [] for r in self.REPOS}
+        self.queries = []
+        fake.list_open_pulls = lambda repo: (self.queries.append(repo) or self.by_repo.get(repo, []))
+        self._orig = sys.modules.get("github_client")
+        sys.modules["github_client"] = fake
+        self.cfg = dict(json.loads(os.environ["TRANSPORT_CONFIG"]))
+        self.cfg["repos"] = list(self.REPOS)
+        self.cfg["draft_repos"] = []
+        os.environ["TRANSPORT_CONFIG"] = json.dumps(self.cfg)
+        for m in list(sys.modules):
+            if m == "poller" or m.startswith("poller."):
+                del sys.modules[m]
+        import poller as pl
+        self.pl = pl
+
+    def tearDown(self):
+        os.environ["TRANSPORT_CONFIG"] = INITIAL_TRANSPORT_CONFIG
+        if self._orig:
+            sys.modules["github_client"] = self._orig
+        else:
+            sys.modules.pop("github_client", None)
+        self.con.close()
+
+    def _pr(self, repo, n, sha, head_repo=None, draft=False, ref="feat/x", assoc="OWNER"):
+        head_repo = head_repo or repo
+        return {"number": n, "draft": draft, "title": "T",
+                "author_association": assoc,
+                "head": {"sha": sha, "ref": ref, "repo": {"full_name": head_repo}},
+                "base": {"sha": "b" * 40}}
+
+    def test_allowlist_only_configured_repos_queried(self):
+        self.by_repo["Revens2/pr-reviewer"] = [self._pr("Revens2/pr-reviewer", 1, "a" * 40)]
+        # PR ouverte sur un repo NON configuré : jamais requêté, jamais enqueue
+        self.by_repo["Revens2/homelab-ops"] = []
+        c, *_ = self.pl.scan_once(self.con)
+        self.assertEqual(c, 1)
+        self.assertEqual(sorted(self.queries), sorted(self.REPOS))
+        rows = self.con.execute("SELECT repo,pr FROM jobs").fetchall()
+        self.assertEqual([r["repo"] for r in rows], ["Revens2/pr-reviewer"])
+
+    def test_same_pr_number_across_two_repos_isolated(self):
+        # même numéro de PR (42) sur deux repos, SHAs différents → 2 jobs séparés
+        self.by_repo["Revens2/pr-reviewer"] = [self._pr("Revens2/pr-reviewer", 42, "a" * 40)]
+        self.by_repo["Revens2/homelab-ops"] = [self._pr("Revens2/homelab-ops", 42, "f" * 40)]
+        c, *_ = self.pl.scan_once(self.con)
+        self.assertEqual(c, 2)
+        rows = self.con.execute("SELECT id,repo,pr,head_sha FROM jobs ORDER BY repo").fetchall()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["repo"], "Revens2/homelab-ops")
+        self.assertEqual(rows[1]["repo"], "Revens2/pr-reviewer")
+        self.assertEqual(rows[0]["pr"], 42)
+        self.assertEqual(rows[1]["pr"], 42)
+        self.assertEqual(rows[0]["head_sha"], "f" * 40)
+        self.assertEqual(rows[1]["head_sha"], "a" * 40)
+        self.assertNotEqual(rows[0]["id"], rows[1]["id"])
+        # re-scan → dédup (rien de nouveau)
+        c2, d2, *_ = self.pl.scan_once(self.con)
+        self.assertEqual((c2, d2), (0, 2))
+
+    def test_fork_and_draft_skipped_on_every_repo(self):
+        self.by_repo["Revens2/pr-reviewer"] = [
+            self._pr("Revens2/pr-reviewer", 10, "a" * 40),
+            # PR depuis un fork externe → jamais de review
+            self._pr("Revens2/pr-reviewer", 11, "b" * 40, head_repo="SomeoneElse/fork"),
+        ]
+        self.by_repo["Revens2/homelab-ops"] = [
+            self._pr("Revens2/homelab-ops", 12, "c" * 40, draft=True),   # draft → SKIP
+            self._pr("Revens2/homelab-ops", 13, "d" * 40),
+        ]
+        c, d, f, dr, a, p, e = self.pl.scan_once(self.con)
+        self.assertEqual((c, f, dr), (2, 1, 1))
+        rows = self.con.execute("SELECT pr,repo FROM jobs ORDER BY pr").fetchall()
+        self.assertEqual([r["pr"] for r in rows], [10, 13])
+
+    def test_unconfigured_repo_skipped_even_if_pull_listed(self):
+        # le stub ne reçoit JAMAIS d'appel pour un repo hors allowlist
+        self.by_repo = {r: [self._pr(r, 1, "a" * 40)] for r in self.REPOS}
+        self.by_repo["Revens2/unknown"] = [self._pr("Revens2/unknown", 1, "z" * 40)]
+        c, *_ = self.pl.scan_once(self.con)
+        self.assertEqual(c, 2)
+        self.assertNotIn("Revens2/unknown", self.queries)
+        rows = self.con.execute("SELECT DISTINCT repo FROM jobs").fetchall()
+        self.assertEqual(sorted(r["repo"] for r in rows), sorted(self.REPOS))
+
+
 class TestEnvfile(unittest.TestCase):
     """envfile.load : charge state/.env sans écraser l'env existant."""
 

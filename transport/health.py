@@ -60,14 +60,26 @@ def main():
     except Exception as e:
         out["queue"] = {"error": str(e)[:120]}
         out["status"] = "degraded"
-    # GitHub auth (1 GET léger, jamais la valeur du token)
-    try:
-        d = gh._req("GET", f"/repos/{CFG['repos'][0]}")
-        out["github"] = {"repo": CFG["repos"][0], "ok": True,
-                         "default_branch": d.get("default_branch"),
-                         "private": d.get("private")}
-    except RuntimeError as e:
-        out["github"] = {"ok": False, "err": str(e)[-120:]}
+    # GitHub auth : chaque repo de l'allowlist doit répondre (1 GET léger par
+    # repo, jamais la valeur du token). Multi-repo : un repo inaccessible → degraded.
+    repos = CFG.get("repos") or []
+    max_checks = int(CFG.get("health_max_repos", 25))
+    checked = repos[:max_checks]
+    failures = []
+    first = None
+    for r in checked:
+        try:
+            d = gh._req("GET", f"/repos/{r}")
+            if first is None:
+                first = d
+        except RuntimeError as e:
+            failures.append({"repo": r, "err": str(e)[-120:]})
+    out["github"] = {"repo": checked[0] if checked else None,
+                      "monitored": len(repos), "checked": len(checked),
+                      "ok": not failures, "failures": failures,
+                      "default_branch": (first or {}).get("default_branch"),
+                      "private": (first or {}).get("private")}
+    if failures:
         out["status"] = "degraded"
     # fb-vps (container du reviewer — jamais de session Muse démarrée ici)
     try:

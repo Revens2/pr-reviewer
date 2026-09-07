@@ -18,6 +18,40 @@ Statut : **ADVISORY** (jamais `required`, jamais de ruleset). Verdict visible : 
 (PASS certifié), `failure` (BLOCK certifié), `error` (échec technique / non certifié —
 un problème ne devient jamais `success`).
 
+## Multi-repo (explicit allowlist)
+
+The reviewer is repo-agnostic. The set of monitored repositories is an **explicit allowlist**
+living in `transport/config.json` on the VPS (template: `transport/config.example.json`) —
+outside the code, easy to change, versioned (it holds no secret):
+
+```json
+"repos": ["Revens2/pr-reviewer", "Revens2/homelab-ops", "owner/another-active-repo"],
+```
+
+- Add/remove a repository = **one config line** + `systemctl restart pr-reviewer-poller`;
+  the 45 s poll cycle then applies. No code change, no image rebuild.
+- Every repo gets the same gates (draft → SKIP, fork head → SKIP, author association,
+  stale-SHA protection) and the same fail-closed model policy.
+- Jobs are keyed `repo|PR|head_sha`: the same PR number on two different repositories never
+  collides (`poller.py` scans the allowlist, `worker.py` only reads the job row).
+- Observability aggregates per repository: `health.py` checks every allowlisted repo,
+  `report.py` prints a per-repo breakdown and accepts `--repo owner/name`.
+
+`Revens2/agent-island` is **not** a target of the service: it was the historical end-to-end
+fixture used to validate the chain, and its old E2E jobs remain in the SQLite history as
+evidence only (no special-case code exists anywhere — see `docs/ARCHITECTURE.md`).
+
+## Déclencheur (couche sémantique)
+
+The deterministic layers (Semgrep, Gitleaks, tests, CI) run in their own pipelines — never here.
+This service only adds the **semantic layer**:
+
+- trigger = an open PR (same repo, non-draft, trusted author) on an allowlisted repository,
+  or a new `head_sha` pushed to such a PR — polled every 45 s, no webhook;
+- a raw push to a branch that belongs to **no** open PR is never reviewed;
+- a push to a branch of an open PR triggers a review of the new SHA (dedup `repo|PR|head_sha`,
+  stale-SHA protection before any publish).
+
 ## Non-négociables
 
 - Le conteneur Freebuff ne peut **jamais modifier le repo** : snapshot monté en lecture
@@ -34,7 +68,7 @@ un problème ne devient jamais `success`).
 |---|---|
 | `transport/` | Orchestrateur : `poller.py`, `worker.py`, `db.py` (queue SQLite), `github_client.py`, `envfile.py`, `docker_guard.py`, `health.py`, `observe.py`/`report.py`/`readiness.py`/`feedback.py` (observabilité advisory), `receiver.py` (webhook optionnel, non utilisé) |
 | `reviewer/` | Image Docker sandbox + instructions trusted `AGENTS.md` + skill `pr-review` + scripts orchestrator (driver tmux, probe modèle, assemble verdict) |
-| `tests/` | Tests offline (aucun quota modèle) : `transport_test.py` + `hardening_test.py` (38) |
+| `tests/` | Tests offline (aucun quota modèle) : `transport_test.py` + `hardening_test.py` (43) |
 | `deploy/systemd/` | Unités service durcies `pr-reviewer-poller` / `pr-reviewer-worker` |
 | `deploy/root-wrapper/` | Wrapper ROOT `pr-reviewer-docker` (boundary docker, voir `docs/HARDENING.md`) |
 | `deploy/harden_vps.sh` / `deploy/rollback_juliann.sh` | Durcissement + rollback (root) |
@@ -74,7 +108,7 @@ durcissement (retour unités `juliann` + groupe docker) : `deploy/rollback_julia
 ## Tests
 
 ```bash
-python3 -m unittest tests.transport_test tests.hardening_test  # queue/gates/verdicts/reconcile/quota/guard/readiness/feedback-qualify (38)
+python3 -m unittest tests.transport_test tests.hardening_test  # queue/gates/verdicts/reconcile/quota/guard/readiness/feedback-qualify + multi-repo (43)
 bash tests/test_offline.sh                 # driver FAKE_TUI + assemble + adversarial (image locale)
 ```
 

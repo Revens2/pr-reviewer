@@ -56,15 +56,36 @@ def aggregate(jobs):
     a["review_p50"] = observe.percentile(a["latency_review"], 0.5)
     a["review_p95"] = observe.percentile(a["latency_review"], 0.95)
     a["cert_rate"] = round(a["certified"] / a["total"], 3) if a["total"] else None
+    # dimension repository : rapport global + par repo (chaque job est agrégé
+    # sous son propre repo, jamais mélangé).
+    by_repo = {}
+    for j in jobs:
+        b = by_repo.setdefault(j["repo"], {"total": 0, "pass": 0, "block": 0,
+                                           "error": 0, "certified": 0,
+                                           "real": 0, "fixture": 0, "unknown": 0})
+        b["total"] += 1
+        b[j["kind"]] += 1
+        if j["state"] == "done" and j["status"] == "PASS":
+            b["pass"] += 1
+        elif j["state"] == "done" and j["status"] == "BLOCK":
+            b["block"] += 1
+        else:
+            b["error"] += 1
+        if j["certified"]:
+            b["certified"] += 1
+    a["by_repo"] = by_repo
     return a
 
 
 def main():
     ap = argparse.ArgumentParser(description="rapport advisory pr-reviewer (read-only)")
     ap.add_argument("--since", default="30d", help="all|7d|30d|Nd")
+    ap.add_argument("--repo", default=None, help="filtrer sur un repo (owner/name)")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
     jobs = observe.load_jobs(CFG["db_path"], observe.since_ts(args.since))
+    if args.repo:
+        jobs = [j for j in jobs if j["repo"] == args.repo]
     agg = aggregate(jobs)
     eff = observe.effective_feedback(STATE)
     fb = observe.feedback_stats(jobs, eff)
@@ -79,6 +100,12 @@ def main():
     print(f"latence totale p50/p95: {agg['latency_p50']}/{agg['latency_p95']} s ; review p50/p95: {agg['review_p50']}/{agg['review_p95']} s")
     print(f"retries total: {agg['retries_total']} ; findings par sévérité: {agg['severity']}")
     print(f"errors par classe: {agg['errors_by_class'] or 'aucun'}")
+    if agg["by_repo"] and not args.repo:
+        print("== par repo ==")
+        for repo, b in sorted(agg["by_repo"].items()):
+            print(f"  {repo:30} total={b['total']:2}  PASS={b['pass']:2}  "
+                  f"BLOCK={b['block']:2}  ERROR={b['error']:2}  "
+                  f"certifiées={b['certified']:2}  (real={b['real']}, fixture={b['fixture']})")
     c = fb["counts"]
     print(f"qualification humaine: {fb['findings_qualified']} finding(s) qualifié(s) — "
           f"confirmed={c['confirmed']} false_positive={c['false_positive']} unclear={c['unclear']} "

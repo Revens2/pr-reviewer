@@ -1,4 +1,5 @@
 {
+  "_doc": "Exemple de configuration du transport (générique multi-repo). Copier vers transport/config.json (hors git, chemins VPS). 'repos' = ALLOWLIST explicite des dépôts surveillés : une entrée par repo, hors code, versionnable (aucun secret ici). 'draft_repos' = repos où les PR draft sont acceptées (réservé fixtures). 'pr_branch_prefixes' vide = toutes les branches same-repo. 'author_associations' = métadonnées GitHub fiables (jamais le simple username).",
   "listen_host": "127.0.0.1",
   "listen_port": 8795,
   "db_path": "/home/juliann/pr-reviewer/transport/state/jobs.db",
@@ -11,7 +12,7 @@
   "out_volume": "fb-vps-output",
   "model_requested": "meta/muse-spark-1.3-contributor",
   "events": ["opened", "reopened", "ready_for_review", "synchronize"],
-  "repos": ["Revens2/agent-island"],
+  "repos": ["Revens2/pr-reviewer", "Revens2/homelab-ops"],
   "draft_repos": [],
   "author_associations": ["OWNER", "MEMBER", "COLLABORATOR"],
   "pr_branch_prefixes": [],

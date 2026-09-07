@@ -2,11 +2,17 @@
 
 > **MISE À JOUR 2026-09-07 (durcissement + observabilité)** : architecture = **poller GitHub (45 s,
 > READ-ONLY) + queue SQLite + worker → fb-vps → commit status « Muse Semantic Review »**, advisory
-> réel sur `Revens2/agent-island`. Composants ajoutés : `docker_guard.py` (boundary docker), wrapper
+> réel multi-repo (allowlist explicite `config.json → repos`, aucun repo hardcodé dans le code).
+> Composants ajoutés : `docker_guard.py` (boundary docker), wrapper
 > ROOT `pr-reviewer-docker` (worker `prreview` sans groupe docker), `observe.py`/`report.py`/
-> `readiness.py`/`feedback.py` (métriques advisory). Preuves : E2E A/B/C + PR #1 réelle (BLOCK
-> certifié 7 findings) — `docs/RAPPORT-FINAL-20260907.md`, `docs/HARDENING.md`,
-> `docs/ADVISORY-METRICS.md`. Le receiver webhook ci-dessous reste disponible (non utilisé).
+> `readiness.py`/`feedback.py` (métriques advisory, dimension `repository` incluse).
+>
+> **MISE À JOUR 2026-09-07 (généralisation multi-repo)** : `Revens2/agent-island` n'est plus une
+> cible du service — il a servi de dépôt E2E historique (A/B/C PR #6, PR #1/#7 qualifiées). Aucune
+> logique métier ne référence un repo particulier ; les anciens jobs E2E restent dans l'historique
+> SQLite comme preuves. Preuves : `docs/RAPPORT-FINAL-20260907.md`, `docs/HARDENING.md`,
+> `docs/ADVISORY-METRICS.md`, `docs/PR1-FINDINGS-QUALIFICATION.md`. Le receiver webhook reste
+> disponible (non utilisé).
 
 Date : 2026-09-06 (base POC). Statut courant : **ADVISORY PRODUCTION RUNNING, durci** — voir les
 mise à jour ci-dessus pour l'état live.
@@ -14,7 +20,7 @@ mise à jour ci-dessus pour l'état live.
 ## Vue d'ensemble
 
 ```
-PR GitHub (webhook, plus tard)
+PR GitHub ouverte (poller 45 s, allowlist de repos — READ-ONLY)
    → Orchestrateur (hôte, hors sandbox ; détient le token GitHub)
        ├─ snapshot read-only : checkout du head SHA (JAMAIS le runner)
        ├─ job dir + lock (concurrency=1)
@@ -72,9 +78,11 @@ checks par SHA, remplacement de commentaire, retry INSTANCE_BUSY) sont notre cou
 toute façon. Image vérifiée : `pragent/pr-agent:0.45.0-github_app` (linux/arm64, digest
 `sha256:2cfd644b0641…`), à réévaluer si upstream ajoute une primitive de délégation externe.
 
-**Transport retenu — orchestrateur maison minimal** (`transport/`) : receiver webhook (HMAC-SHA256,
-allowlist events/repos/drafts, corps borné) → file SQLite (id immuable repo|PR|SHA, états
-pending/running/retry/done/error, retries bornés) → worker concurrency=1 pilotant le conteneur
+**Transport retenu — orchestrateur maison minimal** (`transport/`) : **poller GitHub (45 s,
+READ-ONLY)** qui scanne les PR ouvertes des repos de l'allowlist (`config.json → repos`, hors
+code, ajout d'un repo = une ligne + restart du poller) et enqueue chaque nouveau head_sha avec
+les gates §7 (même repo, non-draft, author_association) → file SQLite (id immuable repo|PR|SHA,
+états pending/running/retry/done/error, retries bornés) → worker concurrency=1 pilotant le conteneur
 `fb-vps` existant (réutilisation de session chaude, boot déterministe par `settings.freebuffModel`,
 reprise auto après dépossession « took over », jamais de Take over automatique) → probe de
 certification multi-preuves → anti-stale → publication Check (« Muse Semantic Review » :

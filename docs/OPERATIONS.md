@@ -4,6 +4,15 @@ Service VPS : deux unités systemd (`pr-reviewer-poller`, `pr-reviewer-worker`) 
 `prreview` (**sans** groupe docker — docker piloté via le wrapper ROOT `pr-reviewer-docker`, voir
 `docs/HARDENING.md`). L'entrypoint charge `state/.env` lui-même (défense en profondeur).
 
+**Multi-repo (allowlist)** : les dépôts surveillés sont définis par `repos` dans
+`transport/config.json` — configuration hors code, versionnable, aucun secret. Le poller scanne
+chaque repo de l'allowlist avec les mêmes gates (same-repo, non-draft, auteur autorisé) ; les
+jobs sont séparés par identité immuable `repo|PR|head_sha`. Ajouter/retirer un repo = une ligne
+de config + restart du poller (aucun changement de code). `health.py` vérifie **chaque** repo de
+l'allowlist (`github.monitored`, `github.ok`, `github.failures`) ; `report.py` agrège globalement
+et par repo. `Revens2/agent-island` ne fait plus partie de la cible (fixture E2E historique —
+ses jobs `done` restent en historique SQLite, aucune logique métier ne le référence).
+
 ## Références opératoires
 
 | Action | Commande |
@@ -15,6 +24,8 @@ Service VPS : deux unités systemd (`pr-reviewer-poller`, `pr-reviewer-worker`) 
 | Logs | `journalctl -u pr-reviewer-worker -f` ; `journalctl -u pr-reviewer-poller -n 100` |
 | Santé | `python3 transport/health.py` (JSON : poller, worker, queue, github, fb-vps, disque — exit 0/1) |
 | Rapport advisory | `python3 transport/report.py --since 7d` (read-only, aucun quota) |
+| Rapport par repo | `python3 transport/report.py --since 30d` (global) ; `python3 transport/report.py --repo owner/name --since 30d` (un seul repo) |
+| Modifier les repos surveillés | éditer la liste `repos` (allowlist) dans `transport/config.json` puis `sudo systemctl restart pr-reviewer-poller pr-reviewer-worker` |
 | Required-readiness | `python3 transport/readiness.py` (NOT_ENOUGH_DATA/NOT_READY/CANDIDATE_READY) |
 | Label un finding | `python3 transport/feedback.py label <job_id> <idx> <confirmed|false_positive|unclear|obsolete|duplicate|not_reviewed> [note] [--sev …] [--conf …] [--ev "preuve"]` |
 | Inspecter la file | `python3 -c "import sqlite3;print(sqlite3.connect('transport/state/jobs.db').execute('select state,count(*) from jobs group by state').fetchall())"` |
