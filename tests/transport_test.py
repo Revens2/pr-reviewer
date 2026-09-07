@@ -34,6 +34,11 @@ import receiver as rcv
 import worker as wk  # noqa: F401 (import pour verdict mapping)
 import envfile
 
+# Config initiale (chemins sous TMP, inscriptibles) — restaurée en tearDown pour
+# que les imports ultérieurs (poller/worker) ne lisent JAMAIS config.example.json
+# (chemins /home/... absents sur les runners CI).
+INITIAL_TRANSPORT_CONFIG = os.environ["TRANSPORT_CONFIG"]
+
 
 def sig(body: bytes) -> str:
     return "sha256=" + hmac.new(b"test-secret", body, hashlib.sha256).hexdigest()
@@ -194,8 +199,7 @@ class TestPoller(unittest.TestCase):
         self.pl = pl
 
     def tearDown(self):
-        os.environ["TRANSPORT_CONFIG"] = json.dumps(json.loads(
-            (pathlib.Path(HERE) / "transport" / "config.example.json").read_text()))
+        os.environ["TRANSPORT_CONFIG"] = INITIAL_TRANSPORT_CONFIG
         if self._orig:
             sys.modules["github_client"] = self._orig
         else:
