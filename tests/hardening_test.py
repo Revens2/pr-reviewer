@@ -143,8 +143,9 @@ class TestFeedback(unittest.TestCase):
         import feedback as fb
         self.fb = fb
         self.fb.CFG["db_path"] = str(self.dbp)   # job lu depuis cette base
-        self.fb.STATE = pathlib.Path(TMP)
-        self.state = pathlib.Path(TMP)
+        # state dir dédié PAR TEST (hermétique — pas de contamination entre tests)
+        self.state = pathlib.Path(tempfile.mkdtemp(prefix="fbs-"))
+        self.fb.STATE = self.state
 
     def tearDown(self):
         os.environ["TRANSPORT_CONFIG"] = json.dumps({"db_path": str(pathlib.Path(TMP) / "jobs.db")})
@@ -160,6 +161,98 @@ class TestFeedback(unittest.TestCase):
         labels = observe.labels_by_job(self.state)
         self.assertEqual(labels[jid][0], "confirmed")
         self.assertEqual(labels[jid][1], "false_positive")
+
+
+class TestFeedbackQualify(unittest.TestCase):
+    """Qualification étendue : labels obsolete/duplicate, sévérité humaine,
+    upsert au re-label, dénominateurs (unclear exclu) et BLOCK quality."""
+
+    def setUp(self):
+        self.dbp = pathlib.Path(TMP) / f"fq{time.time_ns()}.db"
+        os.environ["TRANSPORT_CONFIG"] = json.dumps({"db_path": str(self.dbp)})
+        import feedback as fb
+        self.fb = fb
+        self.fb.CFG["db_path"] = str(self.dbp)
+        # state dir dédié PAR TEST (hermétique — pas de contamination entre tests)
+        self.state = pathlib.Path(tempfile.mkdtemp(prefix="fqs-"))
+        self.fb.STATE = self.state
+        self.jid = f"R/a|9|{'d'*40}"
+        self.findings = [{"severity": "major", "title": "t1"},
+                         {"severity": "minor", "title": "t2"},
+                         {"severity": "major", "title": "t3"}]
+        finished_job("R/a", 9, "d" * 40, head_ref="feat/q", status="BLOCK",
+                     findings=self.findings)
+
+    def tearDown(self):
+        os.environ["TRANSPORT_CONFIG"] = json.dumps({"db_path": str(pathlib.Path(TMP) / "jobs.db")})
+
+    def _job(self):
+        jobs = observe.load_jobs(self.dbp, 0.0)
+        return [j for j in jobs if j["id"] == self.jid][0]
+
+    def test_extended_labels_and_upsert(self):
+        self.assertEqual(self.fb.label(self.jid, 0, "obsolete"), 0)
+        self.assertEqual(self.fb.label(self.jid, 1, "duplicate"), 0)
+        self.assertEqual(self.fb.label(self.jid, 2, "unclear",
+                                       severity_human="major", confidence="low"), 0)
+        eff = observe.effective_feedback(self.state)
+        self.assertEqual(eff[self.jid][0]["label"], "obsolete")
+        self.assertEqual(eff[self.jid][1]["label"], "duplicate")
+        self.assertEqual(eff[self.jid][2]["severity_human"], "major")
+        # re-label remplace (upsert) — pas de doublon dans le fichier
+        self.assertEqual(self.fb.label(self.jid, 0, "confirmed",
+                                       severity_human="minor", confidence="high"), 0)
+        eff2 = observe.effective_feedback(self.state)
+        self.assertEqual(eff2[self.jid][0]["label"], "confirmed")
+        self.assertEqual(eff2[self.jid][0]["severity_human"], "minor")
+        lines = [l for l in (self.state / "feedback.jsonl").read_text().splitlines() if l.strip()]
+        self.assertEqual(len([l for l in lines if f'"finding_idx": 0' in l]), 1)
+
+    def test_invalid_label_and_severity_rejected(self):
+        self.assertEqual(self.fb.label(self.jid, 0, "maybe"), 2)
+        self.assertEqual(self.fb.label(self.jid, 0, "confirmed", severity_human="bloquant"), 2)
+        self.assertEqual(self.fb.label(self.jid, 0, "confirmed", confidence="sure"), 2)
+
+    def test_feedback_stats_denominator_excludes_unclear(self):
+        self.fb.label(self.jid, 0, "confirmed", severity_human="major", confidence="high")
+        self.fb.label(self.jid, 1, "false_positive", severity_human="info")
+        self.fb.label(self.jid, 2, "unclear")
+        job = self._job()
+        fb = observe.feedback_stats([job], observe.effective_feedback(self.state))
+        self.assertEqual(fb["counts"]["confirmed"], 1)
+        self.assertEqual(fb["counts"]["false_positive"], 1)
+        self.assertEqual(fb["counts"]["unclear"], 1)
+        # décisions binaires = confirmed + fp → taux 0.5/0.5 (unclear exclu)
+        self.assertEqual(fb["confirmed_rate"], 0.5)
+        self.assertEqual(fb["false_positive_rate"], 0.5)
+        self.assertEqual(fb["severity_agreement"]["exact"], 1)  # major==major
+        self.assertEqual(fb["severity_agreement"]["muse_higher"], 1)  # fp: muse minor→info
+
+    def test_block_quality(self):
+        job = self._job()
+        # non qualifié → UNKNOWN
+        self.assertEqual(observe.block_quality(job, {}), "UNKNOWN")
+        # 1 confirmed bloquant (major) → BLOCK_CORRECT
+        self.fb.label(self.jid, 0, "confirmed", severity_human="major")
+        self.fb.label(self.jid, 1, "false_positive")
+        eff = observe.effective_feedback(self.state)
+        self.assertEqual(observe.block_quality(job, eff), "BLOCK_CORRECT")
+        # tout faux → BLOCK_INCORRECT
+        self.fb.label(self.jid, 0, "false_positive")
+        self.fb.label(self.jid, 2, "false_positive")
+        eff = observe.effective_feedback(self.state)
+        self.assertEqual(observe.block_quality(job, eff), "BLOCK_INCORRECT")
+        # confirmés mineurs seulement → BLOCK_OVERREACH
+        self.fb.label(self.jid, 0, "confirmed", severity_human="minor")
+        self.fb.label(self.jid, 2, "confirmed", severity_human="minor")
+        eff = observe.effective_feedback(self.state)
+        self.assertEqual(observe.block_quality(job, eff), "BLOCK_OVERREACH")
+        # obsolete seul = valide au SHA reviewé (sévérité Muse major en repli) → CORRECT
+        self.fb.label(self.jid, 0, "obsolete")
+        self.fb.label(self.jid, 1, "duplicate")
+        self.fb.label(self.jid, 2, "obsolete")
+        eff = observe.effective_feedback(self.state)
+        self.assertEqual(observe.block_quality(job, eff), "BLOCK_CORRECT")
 
 
 if __name__ == "__main__":

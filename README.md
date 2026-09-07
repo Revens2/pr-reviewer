@@ -34,7 +34,7 @@ un problème ne devient jamais `success`).
 |---|---|
 | `transport/` | Orchestrateur : `poller.py`, `worker.py`, `db.py` (queue SQLite), `github_client.py`, `envfile.py`, `docker_guard.py`, `health.py`, `observe.py`/`report.py`/`readiness.py`/`feedback.py` (observabilité advisory), `receiver.py` (webhook optionnel, non utilisé) |
 | `reviewer/` | Image Docker sandbox + instructions trusted `AGENTS.md` + skill `pr-review` + scripts orchestrator (driver tmux, probe modèle, assemble verdict) |
-| `tests/` | Tests offline (aucun quota modèle) : `transport_test.py` + `hardening_test.py` |
+| `tests/` | Tests offline (aucun quota modèle) : `transport_test.py` + `hardening_test.py` (38) |
 | `deploy/systemd/` | Unités service durcies `pr-reviewer-poller` / `pr-reviewer-worker` |
 | `deploy/root-wrapper/` | Wrapper ROOT `pr-reviewer-docker` (boundary docker, voir `docs/HARDENING.md`) |
 | `deploy/harden_vps.sh` / `deploy/rollback_juliann.sh` | Durcissement + rollback (root) |
@@ -74,7 +74,7 @@ durcissement (retour unités `juliann` + groupe docker) : `deploy/rollback_julia
 ## Tests
 
 ```bash
-python3 -m unittest tests.transport_test tests.hardening_test  # queue/gates/verdicts/reconcile/quota/guard/readiness (34)
+python3 -m unittest tests.transport_test tests.hardening_test  # queue/gates/verdicts/reconcile/quota/guard/readiness/feedback-qualify (38)
 bash tests/test_offline.sh                 # driver FAKE_TUI + assemble + adversarial (image locale)
 ```
 

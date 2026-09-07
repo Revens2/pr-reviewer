@@ -51,22 +51,32 @@ def _status(jobs, labels):
         reasons.append(f"erreurs techniques {err_rate:.0%} > {MAX_TECH_ERROR_RATE:.0%}")
     block_findings = [j for j in real if j["status"] == "BLOCK"]
     total_bf = sum(len(j["findings"]) for j in block_findings)
-    labeled = 0
-    fp = 0
+    # Dénominateurs (documentés) : `unclear` n'est ni une décision ni un FP —
+    # il est exclu de l'éligibilité (couverture) et des décisions binaires ;
+    # obsolete/duplicate = qualifiés non-FP (pas des anomalies indépendantes).
+    qualified = unclear = fp = confirmed = 0
     for j in block_findings:
         lj = labels.get(j["id"], {})
-        for i, f in enumerate(j["findings"]):
+        for i in range(len(j["findings"])):
             lab = lj.get(i)
-            if lab:
-                labeled += 1
+            if lab is None or lab == "not_reviewed":
+                continue
+            if lab == "unclear":
+                unclear += 1
+            elif lab in ("confirmed", "false_positive", "obsolete", "duplicate"):
+                qualified += 1
                 if lab == "false_positive":
                     fp += 1
-    if total_bf:
-        labeled_rate = labeled / total_bf
-        if labeled_rate < MIN_LABELED_RATE:
-            reasons.append(f"findings BLOCK qualifiés {labeled_rate:.0%} < {MIN_LABELED_RATE:.0%}")
-        if labeled:
-            fp_rate = fp / labeled
+                if lab == "confirmed":
+                    confirmed += 1
+    decision_eligible = total_bf - unclear
+    if decision_eligible:
+        coverage = qualified / decision_eligible
+        if coverage < MIN_LABELED_RATE:
+            reasons.append(f"findings BLOCK qualifiés {coverage:.0%} < {MIN_LABELED_RATE:.0%} (hors unclear)")
+        decided = confirmed + fp
+        if decided:
+            fp_rate = fp / decided
             if fp_rate > MAX_FALSE_POSITIVE_RATE:
                 reasons.append(f"faux positifs déclarés {fp_rate:.0%} > {MAX_FALSE_POSITIVE_RATE:.0%}")
     # critères qualitatifs affichés (évaluation humaine, pas automatisable ici)
@@ -86,9 +96,21 @@ def main():
     jobs = observe.load_jobs(CFG["db_path"], 0.0)
     labels = observe.labels_by_job(STATE)
     status, reasons, real = _status(jobs, labels)
+    eff = observe.effective_feedback(STATE)
+    fb = observe.feedback_stats(jobs, eff)
+    real_blocks = [j for j in real if j["status"] == "BLOCK"]
+    block_qual = [observe.block_quality(j, eff) for j in real_blocks]
+    # reviews qualifiées = BLOCK réels avec ≥1 finding qualifié (décision humaine)
+    human_qualified = [j for j in real_blocks
+                       if any(e.get("label") not in (None, "not_reviewed")
+                              for e in eff.get(j["id"], {}).values())]
     info = {
         "status": status,
         "real_reviews": len(real),
+        "real_block_reviews": len(real_blocks),
+        "human_qualified_reviews": len(human_qualified),
+        "block_quality": block_qual,
+        "feedback": fb,
         "reasons": reasons,
         "total_jobs": len(jobs),
         "thresholds": {k: v for k, v in globals().items()
@@ -99,6 +121,12 @@ def main():
     else:
         print(f"required-readiness: {status}")
         print(f"  reviews réelles: {len(real)} / total jobs: {len(jobs)}")
+        print(f"  BLOCK réels: {len(real_blocks)} ; qualifiés humainement: {len(human_qualified)} ; "
+              f"block_quality: {block_qual or 'aucun BLOCK réel'}")
+        c = fb["counts"]
+        print(f"  qualification: confirmed={c['confirmed']} false_positive={c['false_positive']} "
+              f"unclear={c['unclear']} obsolete={c['obsolete']} duplicate={c['duplicate']} "
+              f"| confirmed_rate={fb['confirmed_rate']} fp_rate={fb['false_positive_rate']}")
         for r in reasons:
             print(f"  - {r}")
         if status == "CANDIDATE_READY":

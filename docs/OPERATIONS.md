@@ -16,7 +16,7 @@ Service VPS : deux unités systemd (`pr-reviewer-poller`, `pr-reviewer-worker`) 
 | Santé | `python3 transport/health.py` (JSON : poller, worker, queue, github, fb-vps, disque — exit 0/1) |
 | Rapport advisory | `python3 transport/report.py --since 7d` (read-only, aucun quota) |
 | Required-readiness | `python3 transport/readiness.py` (NOT_ENOUGH_DATA/NOT_READY/CANDIDATE_READY) |
-| Label un finding | `python3 transport/feedback.py label <job_id> <idx> <confirmed|false_positive|unclear|not_reviewed>` |
+| Label un finding | `python3 transport/feedback.py label <job_id> <idx> <confirmed|false_positive|unclear|obsolete|duplicate|not_reviewed> [note] [--sev …] [--conf …] [--ev "preuve"]` |
 | Inspecter la file | `python3 -c "import sqlite3;print(sqlite3.connect('transport/state/jobs.db').execute('select state,count(*) from jobs group by state').fetchall())"` |
 | Relancer un job | `python3 -c "import sqlite3,time;c=sqlite3.connect('transport/state/jobs.db');c.execute(\"update jobs set state='pending',next_run=0 where id='<id>'\");c.commit()"` |
 | Purger jobs terminés | `python3 -c "import sqlite3;c=sqlite3.connect('transport/state/jobs.db');print(c.execute(\"delete from jobs where state in ('done','error')\").rowcount);c.commit()"` |

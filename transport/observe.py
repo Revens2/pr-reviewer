@@ -121,8 +121,95 @@ def load_feedback(state_dir):
 
 
 def labels_by_job(state_dir):
-    """job_id -> {finding_idx: label}."""
+    """job_id -> {finding_idx: label} (dernier label gagne)."""
     by = {}
     for e in load_feedback(state_dir):
         by.setdefault(e["job_id"], {})[e["finding_idx"]] = e["label"]
     return by
+
+
+def effective_feedback(state_dir):
+    """job_id -> {finding_idx: entrée complète} — le re-label (job, idx) remplace."""
+    eff = {}
+    for e in load_feedback(state_dir):
+        eff.setdefault(e["job_id"], {})[e["finding_idx"]] = e
+    return eff
+
+
+def feedback_stats(jobs, eff):
+    """Agrégats de qualification sur les findings des jobs donnés.
+
+    Dénominateur de précision = confirmed + false_positive (décision binaire) ;
+    unclear/obsolete/duplicate exclus et comptés à part (documenté). Retourne
+    aussi l'accord de sévérité Muse vs humaine quand severity_human est posé.
+    """
+    counts = {l: 0 for l in ("confirmed", "false_positive", "unclear",
+                              "obsolete", "duplicate")}
+    sev_agreement = {"compared": 0, "exact": 0, "muse_higher": 0, "muse_lower": 0}
+    by_job = {j["id"]: j for j in jobs}
+    order = {"critical": 0, "major": 1, "minor": 2, "info": 3}
+    for jid, m in eff.items():
+        j = by_job.get(jid)
+        fs = (j or {}).get("findings") or []
+        for idx, e in m.items():
+            lab = e.get("label")
+            if lab in counts:
+                counts[lab] += 1
+            sh = (e.get("severity_human") or "").lower()
+            if sh and idx < len(fs):
+                sm = (fs[idx].get("severity") or "info").lower()
+                if sm in order and sh in order:
+                    sev_agreement["compared"] += 1
+                    if sh == sm:
+                        sev_agreement["exact"] += 1
+                    elif order[sh] < order[sm]:
+                        sev_agreement["muse_lower"] += 1
+                    else:
+                        sev_agreement["muse_higher"] += 1
+    decided = counts["confirmed"] + counts["false_positive"]
+    return {
+        "findings_qualified": sum(counts.values()),
+        "counts": counts,
+        "confirmed_rate": round(counts["confirmed"] / decided, 3) if decided else None,
+        "false_positive_rate": round(counts["false_positive"] / decided, 3) if decided else None,
+        "denominator": "confirmed + false_positive (unclear/obsolete/duplicate exclus)",
+        "severity_agreement": sev_agreement,
+    }
+
+
+# Pour un BLOCK réel : au moins un finding CONFIRMED (ou OBSOLETE, valide au SHA
+# reviewé) de sévérité major/critical → BLOCK_CORRECT ; uniquement des FALSE_POSITIVE
+# → BLOCK_INCORRECT ; confirmés mineurs seulement → BLOCK_OVERREACH ; rien de décisif
+# → UNKNOWN (qualification humaine insuffisante). duplicate = non-indépendant (exclu) ;
+# unclear = non décisif. Sévérité = severity_human, sinon sévérité Muse en repli.
+def block_quality(job, eff):
+    """Qualité du BLOCK global d'un job (revue humaine des findings)."""
+    m = eff.get(job["id"], {})
+    fs = job.get("findings") or []
+    blocking = False
+    minor_only = False
+    fp_only = False
+    decided = False
+    for idx, e in m.items():
+        if idx >= len(fs):
+            continue
+        lab = e.get("label")
+        if lab in (None, "not_reviewed", "unclear", "duplicate"):
+            continue
+        decided = True
+        if lab == "false_positive":
+            fp_only = True
+            continue
+        # confirmed ou obsolete : problème réel (au SHA reviewé pour obsolete)
+        sh = (e.get("severity_human") or fs[idx].get("severity") or "info").lower()
+        if sh in ("critical", "major"):
+            blocking = True
+        else:
+            minor_only = True
+    if blocking:
+        return "BLOCK_CORRECT"
+    if not decided:
+        return "UNKNOWN"
+    if fp_only and not minor_only:
+        return "BLOCK_INCORRECT"
+    return "BLOCK_OVERREACH"

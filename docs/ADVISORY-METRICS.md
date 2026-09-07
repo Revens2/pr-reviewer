@@ -35,15 +35,22 @@ errors par classe: aucun
 - Note d'hygiène : les 4 jobs préexistent à la capture de `head_ref` ; backfill manuel prouvé par
   l'API GitHub (noms de branches des PR #1/#6) pour un classement real/fixture exact.
 
-`readiness.py` → **NOT_ENOUGH_DATA** (`1 review réelle < floor de signal 5`). Les seuils actuels
+## Qualification humaine PR #1 (2026-09-07) — première revue réelle qualifiée
+
+`readiness.py` → **NOT_ENOUGH_DATA** (`1 review réelle < floor de signal 5`) mais expose désormais :
+`real_block_reviews=1, human_qualified_reviews=1, block_quality=['BLOCK_CORRECT']`,
+qualification : `confirmed=7 false_positive=0 unclear=0 obsolete=0 duplicate=0 |
+confirmed_rate=1.0 fp_rate=0.0` (dénominateur = confirmed + false_positive, unclear/obsolete/
+duplicate exclus), accord sévérité Muse/humain exact=5/7 (**Muse sur-évalue 2** : F4/F5 major→minor).
+Détail finding par finding + preuves : `docs/PR1-FINDINGS-QUALIFICATION.md`. Les seuils actuels
 (`MIN_REAL_REVIEWS=5`, certification ≥ 90 %, erreurs techniques ≤ 20 %, ≥ 80 % des findings BLOCK
-qualifiés, ≤ 25 % faux positifs déclarés) sont **provisoires** et seront calibrés sur l'observation.
+qualifiés, ≤ 25 % faux positifs déclarés) restent **provisoires** et seront calibrés sur l'observation.
 
 ## Critères qualitatifs pour le futur required (non activé)
 
 - [ ] plusieurs vraies PR observées — en cours (1) ;
-- [ ] 0 incident de corruption / faux BLOCK grave non compris — revue humaine des BLOCK requise
-      (PR #1 : 7 findings à qualifier via `feedback.py`) ;
+- [ ] 0 incident de corruption / faux BLOCK grave non compris — PR #1 qualifiée
+      **BLOCK_CORRECT** (7/7 confirmed, 0 faux positif) ;
 - [ ] erreurs techniques maîtrisées (0 à ce jour) ;
 - [ ] recovery restart prouvée (réconciliation running orphelin testée) ;
 - [ ] consommation Freebucks comprise — **limite** : le solde n'est pas lisible proprement (seul
@@ -51,6 +58,8 @@ qualifiés, ≤ 25 % faux positifs déclarés) sont **provisoires** et seront ca
       `state/balance.json` ;
 - [ ] fallback modèle fail-closed (0 PASS non certifié observé) ;
 - [ ] stabilité service plusieurs jours.
+- [ ] **Calibration sévérité** : 2/7 findings sur-évalués (major→minor) sur PR #1 — suivi
+      nécessaire pour juger si la politique de sévérité de Muse est stable.
 
 ## Compatibilité GitHub (revalidée en live le 2026-09-07)
 

@@ -66,9 +66,9 @@ def main():
     args = ap.parse_args()
     jobs = observe.load_jobs(CFG["db_path"], observe.since_ts(args.since))
     agg = aggregate(jobs)
-    labels = observe.labels_by_job(STATE)
-    labeled = sum(len(v) for v in labels.values())
-    agg["findings_labeled"] = labeled
+    eff = observe.effective_feedback(STATE)
+    fb = observe.feedback_stats(jobs, eff)
+    agg["feedback"] = fb
     if args.json:
         print(json.dumps(agg, indent=2, ensure_ascii=False))
         return
@@ -79,8 +79,13 @@ def main():
     print(f"latence totale p50/p95: {agg['latency_p50']}/{agg['latency_p95']} s ; review p50/p95: {agg['review_p50']}/{agg['review_p95']} s")
     print(f"retries total: {agg['retries_total']} ; findings par sévérité: {agg['severity']}")
     print(f"errors par classe: {agg['errors_by_class'] or 'aucun'}")
-    print(f"findings labellisés (feedback humain): {agg['findings_labeled']} — "
-          f"confirmed/false_positive/unclear via `python3 transport/feedback.py label ...`")
+    c = fb["counts"]
+    print(f"qualification humaine: {fb['findings_qualified']} finding(s) qualifié(s) — "
+          f"confirmed={c['confirmed']} false_positive={c['false_positive']} unclear={c['unclear']} "
+          f"obsolete={c['obsolete']} duplicate={c['duplicate']}")
+    print(f"  confirmed_rate={fb['confirmed_rate']} false_positive_rate={fb['false_positive_rate']} "
+          f"(dénominateur: {fb['denominator']})")
+    print(f"  accord sévérité Muse/humain: {fb['severity_agreement']}")
     print("Freebucks consommés / reviews-par-session : non observables proprement — "
           "solde ponctuel dans state/balance.json (jamais de session démarrée pour mesurer).")
 

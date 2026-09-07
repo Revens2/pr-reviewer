@@ -16,10 +16,13 @@ check obligatoire) n'est pas une décision de code mais de maturité. Critères 
 
 - `python3 transport/readiness.py` → `NOT_ENOUGH_DATA` / `NOT_READY` / `CANDIDATE_READY` + raisons
   (ne modifie rien sur GitHub). Données actuelles : **NOT_ENOUGH_DATA** (1 review réelle < floor de
-  signal). Seuils provisoires calibrés ensuite sur l'observation — voir `docs/ADVISORY-METRICS.md`.
+  signal), mais la première review réelle est qualifiée : `block_quality=BLOCK_CORRECT`,
+  confirmed=7/7, fp=0. Seuils provisoires calibrés ensuite sur l'observation — voir
+  `docs/ADVISORY-METRICS.md`.
 - Feedback humain des findings : `python3 transport/feedback.py label <job_id> <idx>
-  <confirmed|false_positive|unclear|not_reviewed>` (prérequis pour calculer un vrai taux de faux
-  BLOCK).
+  <confirmed|false_positive|unclear|obsolete|duplicate|not_reviewed> [note] [--sev <sev>] [--conf
+  <high|medium|low>] [--ev "preuve"]` (re-label = remplacement). Qualification complète PR #1 :
+  `docs/PR1-FINDINGS-QUALIFICATION.md`.
 
 ## Compatibilité GitHub (revalidée en live le 2026-09-07)
 
