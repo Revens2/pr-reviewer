@@ -1,5 +1,5 @@
 {
-  "_doc": "Exemple de configuration du transport (générique multi-repo). Copier vers transport/config.json (hors git, chemins VPS). 'repos' = ALLOWLIST explicite des dépôts surveillés : une entrée par repo, hors code, versionnable (aucun secret ici). 'draft_repos' = repos où les PR draft sont acceptées (réservé fixtures). 'pr_branch_prefixes' vide = toutes les branches same-repo. 'author_associations' = métadonnées GitHub fiables (jamais le simple username).",
+  "_doc": "Exemple de configuration du transport (g\u00e9n\u00e9rique multi-repo). Copier vers transport/config.json (hors git, chemins VPS). 'repos' = ALLOWLIST explicite des d\u00e9p\u00f4ts surveill\u00e9s : une entr\u00e9e par repo, hors code, versionnable (aucun secret ici). 'draft_repos' = repos o\u00f9 les PR draft sont accept\u00e9es (r\u00e9serv\u00e9 fixtures). 'pr_branch_prefixes' vide = toutes les branches same-repo. 'author_associations' = m\u00e9tadonn\u00e9es GitHub fiables (jamais le simple username).",
   "listen_host": "127.0.0.1",
   "listen_port": 8795,
   "db_path": "/home/juliann/pr-reviewer/transport/state/jobs.db",
@@ -10,15 +10,29 @@
   "auth_volume": "fb-vps-auth",
   "state_volume": "fb-vps-state",
   "out_volume": "fb-vps-output",
-  "model_requested": "meta/muse-spark-1.3-contributor",
-  "events": ["opened", "reopened", "ready_for_review", "synchronize"],
-  "repos": ["Revens2/pr-reviewer", "Revens2/homelab-ops"],
+  "model_requested": "z-ai/glm-5.3-flash",
+  "events": [
+    "opened",
+    "reopened",
+    "ready_for_review",
+    "synchronize"
+  ],
+  "repos": [
+    "Revens2/pr-reviewer",
+    "Revens2/homelab-ops"
+  ],
   "draft_repos": [],
-  "author_associations": ["OWNER", "MEMBER", "COLLABORATOR"],
+  "author_associations": [
+    "OWNER",
+    "MEMBER",
+    "COLLABORATOR"
+  ],
   "pr_branch_prefixes": [],
   "max_retries": 3,
   "timeout_s": 1200,
   "poll_interval_s": 45,
   "freebucks_low": 10,
-  "check_name": "Muse Semantic Review"
+  "check_name": "Muse Semantic Review",
+  "model_label": "GLM 5.3 Flash",
+  "agent_expected": "glm-5-3-flash"
 }

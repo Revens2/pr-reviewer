@@ -19,7 +19,16 @@ OUT="${1:-/reviewer/out/evidence}"
 mkdir -p "${OUT}"
 CFG="${HOME}/.config/manicode"
 REQ="${FB_MODEL_TARGET:-meta/muse-spark-1.3-contributor}"
-EXPECTED_AGENT="muse-spark"
+# Nom de l agent provisionne par le serveur, tel qu il apparait dans le chat
+# log ("Start agent base3-free-<agent> step N"). Il ne se derive PAS de
+# maniere fiable depuis l identifiant du modele : meta/muse-spark-1.3-contributor
+# donne l agent "muse-spark-1-3" (tronque) alors que z-ai/glm-5.3-flash donne
+# "glm-5-3-flash" (complet). D ou un reglage explicite plutot qu une regle.
+# Cette valeur etait codee en dur : apres la migration de modele du 2026-09-05,
+# la sonde voyait le bon modele tourner, le comparait a l ancien, et concluait
+# MUSE_FALLBACK. La review aboutissait mais n etait jamais certifiee, donc
+# jamais publiee -- statut REVIEW_UNAVAILABLE.
+EXPECTED_AGENT="${FB_AGENT_EXPECTED:-muse-spark}"
 STATE="MODEL_UNVERIFIED"
 OBSERVED=""
 CERTIFIED="false"
@@ -56,7 +65,7 @@ if [ -n "${AGENT_LINES}" ]; then
     if [ "${SEL:-}" = "${REQ}" ]; then
       STATE="MUSE_OK"
       CERTIFIED="true"
-      add_ev "agent_log=base3-free-muse-spark-1-3 (provisionné serveur)"
+      add_ev "agent_log=base3-free-${EXPECTED_AGENT} (provisionné serveur)"
     else
       STATE="MUSE_OK_AGENT_ONLY"   # agent muse mais settings divergents
     fi
