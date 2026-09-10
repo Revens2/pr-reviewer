@@ -40,6 +40,10 @@ CFG = json.loads(os.environ.get("TRANSPORT_CONFIG") or
 # dans le vide avant de sortir en TIMEOUT_SESSION, sans jamais rien publier.
 # A la prochaine migration, seules ces deux valeurs changent.
 MODEL_LABEL = CFG.get("model_label", "Muse Spark")
+# .get() et pas CFG[...] : les suites de tests injectent un TRANSPORT_CONFIG
+# minimal (parfois juste db_path). Une lecture obligatoire ici plante a l
+# import et casse tout le hors-ligne, y compris la CI.
+MODEL_REQUESTED = CFG.get("model_requested", "meta/muse-spark-1.3-contributor")
 MODEL_RE = re.escape(MODEL_LABEL)
 # Nom de l agent attendu par la sonde de certification (voir model_probe.sh).
 AGENT_EXPECTED = CFG.get("agent_expected", "muse-spark")
@@ -52,10 +56,10 @@ if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", AGENT_EXPECTED):
 # Un identifiant freebuff s ecrit vendeur/modele, sans metacaractere shell.
 # Tout le reste est refuse au demarrage, bruyamment.
 _MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*")
-if not _MODEL_ID.fullmatch(CFG["model_requested"]):
+if not _MODEL_ID.fullmatch(MODEL_REQUESTED):
     raise SystemExit(
         "model_requested invalide : %r. Format attendu vendeur/modele, "
-        "caracteres [A-Za-z0-9._-] uniquement." % CFG["model_requested"])
+        "caracteres [A-Za-z0-9._-] uniquement." % MODEL_REQUESTED)
 STATE = pathlib.Path(CFG["db_path"]).parent
 METRICS_DIR = STATE / "metrics"
 METRICS_DIR.mkdir(parents=True, exist_ok=True)
@@ -193,11 +197,11 @@ def boot_freebuff(job):
     # preselect modèle Muse (settings persisté) puis tmux propre
     rc, out, err = docker_exec("bash -lc 'export TERM=xterm-256color; "
                                "CFG=$HOME/.config/manicode/settings.json; "
-                               "[ -f \"$CFG\" ] && true \"$CFG\" && "
+                               "[ -f \"$CFG\" ] && "
                                "jq --arg m \"%s\" \".freebuffModel=\\$m\" \"$CFG\" > \"$CFG.t\" && mv \"$CFG.t\" \"$CFG\"; "
                                "tmux kill-server 2>/dev/null; sleep 1; "
                                "tmux new-session -d -s fb -x 300 -y 55 freebuff; echo booted'"
-                               % CFG["model_requested"], timeout=60)
+                               % MODEL_REQUESTED, timeout=60)
     if rc != 0:
         raise RuntimeError(f"boot freebuff: {err[-300:]}")
     # attente état initial (bornée) ; auto-restart si une autre instance a pris
@@ -408,7 +412,7 @@ def run_probe(jobid, out_root):
         log("probe install failed", err=err[-200:])
         return {}
     docker_exec("bash -c 'FB_MODEL_TARGET=%s FB_AGENT_EXPECTED=%s bash /reviewer/out/probe-run-%s.sh /reviewer/out/evidence-%s'"
-                % (CFG["model_requested"], AGENT_EXPECTED, jobid, jobid), timeout=60)
+                % (MODEL_REQUESTED, AGENT_EXPECTED, jobid, jobid), timeout=60)
     rc, raw, _ = docker_exec("cat /reviewer/out/evidence-%s/model.json 2>/dev/null" % jobid, timeout=30)
     try:
         return json.loads(raw)
