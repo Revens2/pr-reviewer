@@ -31,6 +31,35 @@ import github_client as gh
 
 CFG = json.loads(os.environ.get("TRANSPORT_CONFIG") or
                  pathlib.Path(HERE / "config.json").read_text())
+# Libelle affiche par la TUI freebuff pour le modele courant. Il ne se deduit
+# PAS de model_requested : l identifiant vaut z-ai/glm-5.3-flash quand l ecran
+# affiche GLM 5.3 Flash. Les deux vivent donc dans config.json.
+# Pourquoi ce reglage existe : freebuff a migre son modele par defaut le
+# 2026-09-05 (muse-spark -> glm-5.3-flash). Le libelle etait code en dur plus
+# bas ; le header de session ne matchait plus, et chaque review tournait 120 s
+# dans le vide avant de sortir en TIMEOUT_SESSION, sans jamais rien publier.
+# A la prochaine migration, seules ces deux valeurs changent.
+MODEL_LABEL = CFG.get("model_label", "Muse Spark")
+# .get() et pas CFG[...] : les suites de tests injectent un TRANSPORT_CONFIG
+# minimal (parfois juste db_path). Une lecture obligatoire ici plante a l
+# import et casse tout le hors-ligne, y compris la CI.
+MODEL_REQUESTED = CFG.get("model_requested", "meta/muse-spark-1.3-contributor")
+MODEL_RE = re.escape(MODEL_LABEL)
+# Nom de l agent attendu par la sonde de certification (voir model_probe.sh).
+AGENT_EXPECTED = CFG.get("agent_expected", "muse-spark")
+if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", AGENT_EXPECTED):
+    raise SystemExit("agent_expected invalide : %r" % AGENT_EXPECTED)
+
+# docker_exec construit ses commandes en shell=True, et model_requested est
+# interpole dans cette chaine (boot_freebuff). Rendre ce champ configurable a
+# elargi ce vecteur : on le referme ici plutot que de refactorer docker_exec.
+# Un identifiant freebuff s ecrit vendeur/modele, sans metacaractere shell.
+# Tout le reste est refuse au demarrage, bruyamment.
+_MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*")
+if not _MODEL_ID.fullmatch(MODEL_REQUESTED):
+    raise SystemExit(
+        "model_requested invalide : %r. Format attendu vendeur/modele, "
+        "caracteres [A-Za-z0-9._-] uniquement." % MODEL_REQUESTED)
 STATE = pathlib.Path(CFG["db_path"]).parent
 METRICS_DIR = STATE / "metrics"
 METRICS_DIR.mkdir(parents=True, exist_ok=True)
@@ -119,7 +148,7 @@ def parse_balance(text):
         except ValueError:
             fb = None
     minutes = None
-    m = re.search(r"Muse Spark[^\n]*?(\d+)\s*(m|h)\s+left", text, re.IGNORECASE)
+    m = re.search(rf"{MODEL_RE}[^\n]*?(\d+)\s*(m|h)\s+left", text, re.IGNORECASE)
     if m:
         try:
             minutes = int(m.group(1)) * (60 if m.group(2) == "h" else 1)
@@ -168,11 +197,11 @@ def boot_freebuff(job):
     # preselect modèle Muse (settings persisté) puis tmux propre
     rc, out, err = docker_exec("bash -lc 'export TERM=xterm-256color; "
                                "CFG=$HOME/.config/manicode/settings.json; "
-                               "[ -f \"$CFG\" ] && grep -q muse-spark \"$CFG\" && "
+                               "[ -f \"$CFG\" ] && "
                                "jq --arg m \"%s\" \".freebuffModel=\\$m\" \"$CFG\" > \"$CFG.t\" && mv \"$CFG.t\" \"$CFG\"; "
                                "tmux kill-server 2>/dev/null; sleep 1; "
                                "tmux new-session -d -s fb -x 300 -y 55 freebuff; echo booted'"
-                               % CFG["model_requested"], timeout=60)
+                               % MODEL_REQUESTED, timeout=60)
     if rc != 0:
         raise RuntimeError(f"boot freebuff: {err[-300:]}")
     # attente état initial (bornée) ; auto-restart si une autre instance a pris
@@ -183,7 +212,7 @@ def boot_freebuff(job):
     while time.time() - t0 < 180:
         p = pane()
         state, fb = classify_freebucks(p)
-        if state == "EXHAUSTED" and not re.search(r"Muse Spark", p):
+        if state == "EXHAUSTED" and not re.search(rf"{MODEL_RE}", p):
             log("Freebucks épuisé au boot", freebucks=fb)
             return "FREEBUCKS_EXHAUSTED"
         fb_obs = store_balance(p)
@@ -253,7 +282,7 @@ def ensure_session(job):
             docker_exec("tmux send-keys -t fb Enter", timeout=30)
             time.sleep(6)
             continue
-        m = re.search(r"Muse Spark.*?(\d+)\s*(m|h).*?left", p)
+        m = re.search(rf"{MODEL_RE}.*?(\d+)\s*(m|h).*?left", p)
         if m:  # session Muse active (header)
             store_balance(p)
             if re.search(r"Enter a coding task or / for commands", p):
@@ -261,7 +290,7 @@ def ensure_session(job):
             time.sleep(3)
             continue
         # sélecteur : Enter pour démarrer la session Muse (pré-sélection settings)
-        if "Start coding for free" in p or re.search(r"›\s*Muse Spark", p) or "Choose a model" in p:
+        if "Start coding for free" in p or re.search(rf"›\s*{MODEL_RE}", p) or "Choose a model" in p:
             state, fb = classify_freebucks(p)
             if state == "EXHAUSTED":
                 log("Freebucks épuisé — pas de nouvelle session", freebucks=fb)
@@ -382,7 +411,8 @@ def run_probe(jobid, out_root):
     if rc != 0:
         log("probe install failed", err=err[-200:])
         return {}
-    docker_exec("bash /reviewer/out/probe-run-%s.sh /reviewer/out/evidence-%s" % (jobid, jobid), timeout=60)
+    docker_exec("bash -c 'FB_MODEL_TARGET=%s FB_AGENT_EXPECTED=%s bash /reviewer/out/probe-run-%s.sh /reviewer/out/evidence-%s'"
+                % (MODEL_REQUESTED, AGENT_EXPECTED, jobid, jobid), timeout=60)
     rc, raw, _ = docker_exec("cat /reviewer/out/evidence-%s/model.json 2>/dev/null" % jobid, timeout=30)
     try:
         return json.loads(raw)
