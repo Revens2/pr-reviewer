@@ -64,6 +64,21 @@ if not _MODEL_ID.fullmatch(MODEL_REQUESTED):
     raise SystemExit(
         "model_requested invalide : %r. Format attendu vendeur/modele, "
         "caracteres [A-Za-z0-9._-] uniquement." % MODEL_REQUESTED)
+# Chaîne de repli (opencode) : primaire puis model_fallbacks, mêmes règles de format.
+MODEL_FALLBACKS = [m for m in CFG.get("model_fallbacks", []) if m != MODEL_REQUESTED]
+for _m in MODEL_FALLBACKS:
+    if not _MODEL_ID.fullmatch(_m):
+        raise SystemExit("model_fallbacks invalide : %r" % _m)
+MODEL_CHAIN = [MODEL_REQUESTED] + MODEL_FALLBACKS
+# Panne technique (modèles saturés/morts, timeout, bug) : l'API commit status n'a
+# pas d'état "neutral" (check-runs exige une GitHub App, le transport utilise un
+# PAT). On publie donc un statut explicitement "SKIPPED — <raison>" dont l'état
+# GitHub est configurable (défaut success = non bloquant ; "error" = ancien
+# comportement fail-closed). Jamais confondu avec un PASS : description distincte.
+SKIPPED_STATE = CFG.get("skipped_state", "success")
+if SKIPPED_STATE not in ("success", "error", "failure", "pending"):
+    raise SystemExit("skipped_state invalide : %r" % SKIPPED_STATE)
+MAX_PATCH_BYTES = int(CFG.get("max_patch_bytes", 200000))
 STATE = pathlib.Path(CFG["db_path"]).parent
 METRICS_DIR = STATE / "metrics"
 METRICS_DIR.mkdir(parents=True, exist_ok=True)
@@ -316,19 +331,29 @@ def ensure_session(job):
 # --- Publication GitHub -----------------------------------------------------
 
 def error_status_description(error_class):
-    """Description courte (<140) d'un échec technique → commit status error.
-    Un problème technique ne devient JAMAIS success."""
+    """Description courte (<140) d'un échec technique → statut SKIPPED explicite.
+    Un problème technique ne devient JAMAIS un PASS/BLOCK (description SKIPPED)."""
     return {
-        "AUTH_REQUIRED": "ERROR — authentification Freebuff requise (review non effectuée)",
-        "FREEBUCKS_EXHAUSTED": "ERROR — quota Freebucks épuisé (review non effectuée)",
-        "INSTANCE_BUSY": "ERROR — Freebuff occupée sur une autre instance",
-        "TIMEOUT": "ERROR — review Muse en timeout",
-        "TIMEOUT_SESSION": "ERROR — session Muse indisponible",
-        "TIMEOUT_BOOT": "ERROR — démarrage Freebuff impossible",
-        "MODEL_UNVERIFIED": "ERROR — modèle non vérifié (review non certifiée)",
-        "INTERNAL_ERROR": "ERROR — erreur technique interne",
-        "STALE_SHA": "ERROR — head SHA a changé pendant la review",
-    }.get(error_class, "ERROR — review non certifiée / indisponible")
+        "AUTH_REQUIRED": "SKIPPED — authentification Freebuff requise (review non effectuée)",
+        "FREEBUCKS_EXHAUSTED": "SKIPPED — quota Freebucks épuisé (review non effectuée)",
+        "INSTANCE_BUSY": "SKIPPED — Freebuff occupée sur une autre instance",
+        "TIMEOUT": "SKIPPED — modèles en timeout (review non effectuée)",
+        "TIMEOUT_SESSION": "SKIPPED — session Muse indisponible",
+        "TIMEOUT_BOOT": "SKIPPED — démarrage Freebuff impossible",
+        "MODEL_UNVERIFIED": "SKIPPED — modèle non vérifié (review non certifiée)",
+        "MODELS_SATURATED": "SKIPPED — modèles saturés (503/429)",
+        "MODELS_UNAVAILABLE": "SKIPPED — aucun modèle disponible",
+        "INTERNAL_ERROR": "SKIPPED — erreur technique interne",
+        "STALE_SHA": "SKIPPED — head SHA a changé pendant la review",
+    }.get(error_class, "SKIPPED — review non certifiée / indisponible")
+
+
+def publish_skipped(repo, pr, job, error_class, reason=""):
+    """Statut explicite non-verdict pour toute panne technique (voir SKIPPED_STATE)."""
+    desc = error_status_description(error_class)
+    if reason:
+        desc = f"{desc} : {reason}"
+    return publish_status_safe(repo, pr, job, SKIPPED_STATE, desc[:139])
 
 
 def publish_status_safe(repo, pr, job, state, description):
@@ -439,14 +464,15 @@ def verdict_status(verdict):
 
 def status_for_verdict(verdict):
     """Mapping verdict → commit status (state, description). Politique : jamais un
-    success si le verdict n'est pas certifié ; REVIEW_UNAVAILABLE → error explicite."""
+    success-PASS si le verdict n'est pas certifié ; REVIEW_UNAVAILABLE → SKIPPED explicite."""
     status = verdict.get("status")
     cert = bool(verdict.get("model_certified"))
+    used = (verdict.get("model_verified") or "").split("/")[-1] or "Muse"
     if status == "PASS" and cert:
-        return "success", "PASS — review certifiée Muse"
+        return "success", f"PASS — review certifiée {used}"
     if status == "BLOCK" and cert:
-        return "failure", "BLOCK — review certifiée Muse"
-    return "error", error_status_description(verdict.get("error_class") or "MODEL_UNVERIFIED")
+        return "failure", f"BLOCK — review certifiée {used}"
+    return SKIPPED_STATE, error_status_description(verdict.get("error_class") or "MODEL_UNVERIFIED")
 
 
 def publish_check(repo, pr, job, verdict, out_root):
@@ -459,10 +485,13 @@ def publish_check(repo, pr, job, verdict, out_root):
     cert = bool(verdict.get("model_certified"))
     n = len(verdict.get("findings", []))
     st, desc = status_for_verdict(verdict)
-    suffix = f" — {n} finding(s) (head {job['head_sha'][:12]})" if st != "error" else ""
+    real = cert and status in ("PASS", "BLOCK")
+    suffix = f" — {n} finding(s) (head {job['head_sha'][:12]})" if real else ""
+    if real and verdict.get("diff_truncated"):
+        suffix += " [diff tronqué]"
     try:
         gh.create_status(repo, job["head_sha"], st, CFG["check_name"],
-                         f"{desc}{suffix}")
+                         f"{desc}{suffix}"[:139])
     except RuntimeError as e:
         log("commit status publish failed", err=str(e)[-300:])
     # commentaire synthèse seulement si BLOCK ou findings bloquants
@@ -573,6 +602,32 @@ def _metrics(job, action):
 
 # --- Snapshot / cleanup ------------------------------------------------------
 
+def truncate_patch(patch, max_bytes):
+    """Diff trop gros → garde les fichiers entiers dans l'ordre tant que le budget
+    le permet (le premier est coupé s'il dépasse seul). Retourne (patch, omis)."""
+    if max_bytes <= 0 or len(patch.encode()) <= max_bytes:
+        return patch, []
+    chunks = re.split(r"(?m)^(?=diff --git )", patch)
+    kept, omitted, used = [], [], 0
+    for c in chunks:
+        if not c:
+            continue
+        size = len(c.encode())
+        m = re.match(r"diff --git a/\S+ b/(\S+)", c)
+        name = m.group(1) if m else "?"
+        if used + size <= max_bytes:
+            kept.append(c)
+            used += size
+        elif not kept:
+            kept.append(c.encode()[:max_bytes].decode("utf-8", "ignore") + "\n[... fichier tronqué ...]\n")
+            used = max_bytes
+        else:
+            omitted.append(name)
+    head = (f"# NOTE pr-reviewer : diff tronqué à {max_bytes} octets ; "
+            f"{len(omitted)} fichier(s) omis (voir context.json diff_omitted_files)\n")
+    return head + "".join(kept), omitted
+
+
 def snapshot_job(job, out_root):
     """Construit repository/ (head) + change.patch + context.json sous input_bind_root/<jid>.
     Retourne le chemin du cas (vu hôte)."""
@@ -597,10 +652,13 @@ def snapshot_job(job, out_root):
     subprocess.run(["tar", "xzf", str(tar), "-C", str(repo_dir), "--strip-components=1"], check=True)
     tar.unlink()
     cmp = gh.get_compare(job["repo"], job["base_sha"], job["head_sha"])
-    (case / "change.patch").write_text(cmp["patch"] or "(empty diff)")
+    patch, omitted = truncate_patch(cmp["patch"] or "", MAX_PATCH_BYTES)
+    (case / "change.patch").write_text(patch or "(empty diff)")
     ctx = {"repository": job["repo"], "pull_request": job["pr"], "base_sha": job["base_sha"],
            "head_sha": job["head_sha"], "title": job["title"], "files_changed": cmp["files"],
-           "diff_truncated": cmp["truncated"]}
+           "diff_truncated": bool(cmp["truncated"] or patch != (cmp["patch"] or "")),
+           "diff_omitted_files": omitted,
+           "diff_bytes_total": len((cmp["patch"] or "").encode())}
     (case / "context.json").write_text(json.dumps(ctx, indent=2))
     subprocess.run(["chmod", "-R", "a-w", str(repo_dir)], check=False)
     return case
@@ -651,11 +709,35 @@ def main_loop():
             publish_pending(job["repo"], job["pr"], job)
             case = snapshot_job(job, out_root)
             if ENGINE == "opencode":
-                log("review opencode", model=MODEL_REQUESTED)
-                verdict, model, transcript = opencode_engine.review(
-                    job, case, MODEL_REQUESTED, CFG.get("timeout_s", 1200))
-                if verdict.get("head_sha") != job["head_sha"]:
-                    raise RuntimeError("verdict head_sha≠job : %r" % verdict.get("head_sha"))
+                log("review opencode", chain=MODEL_CHAIN)
+                try:
+                    verdict, model, transcript = opencode_engine.review(
+                        job, case, MODEL_CHAIN, CFG.get("attempt_timeout_s", 600),
+                        attempts_per_model=CFG.get("attempts_per_model", 2),
+                        budget_s=CFG.get("review_budget_s", CFG.get("timeout_s", 1800)),
+                        backoff_base_s=CFG.get("backoff_base_s", 15))
+                except opencode_engine.ReviewUnavailable as ru:
+                    log("review indisponible", id=jid, error_class=ru.error_class,
+                        attempts=[f"{a['model'].split('/')[-1]}:{a['outcome']}:{a['s']}s" for a in ru.attempts])
+                    (out_root / "attempts.json").write_text(json.dumps(ru.attempts, indent=2))
+                    if ru.transient and qdb.schedule_retry(con, raw_id, ru.error_class, ru.reason,
+                                                           CFG.get("unavailable_job_retries", 1),
+                                                           base_delay=CFG.get("unavailable_retry_delay_s", 600)):
+                        publish_status_safe(job["repo"], job["pr"], job, "pending",
+                                            "Muse review : modèles saturés, nouvel essai planifié")
+                        cleanup_case(job)
+                        continue
+                    publish_skipped(job["repo"], job["pr"], job, ru.error_class)
+                    qdb.mark(con, raw_id, "error", error_class=ru.error_class, last_error=ru.reason)
+                    _metrics(job, {"kind": "error", "error_class": ru.error_class, "last_error": ru.reason})
+                    cleanup_case(job)
+                    continue
+                log("review ok", id=jid, model_used=model.get("model_used"),
+                    attempts=[f"{a['model'].split('/')[-1]}:{a['outcome']}:{a['s']}s" for a in model.get("attempts", [])])
+                try:
+                    verdict["diff_truncated"] = bool(json.loads((case / "context.json").read_text()).get("diff_truncated"))
+                except Exception:
+                    pass
                 (out_root / "result.json").write_text(json.dumps(verdict, indent=2))
                 (out_root / "transcript.txt").write_text(transcript)
                 (out_root / "model.json").write_text(json.dumps(model, indent=2))
@@ -670,8 +752,7 @@ def main_loop():
                     # Retries epuises (ou etat non retryable) : le pending publie au
                     # claim resterait affiche indefiniment sur la PR. Tout etat
                     # fail-closed terminal doit devenir un commit status error.
-                    publish_status_safe(job["repo"], job["pr"], job, "error",
-                                        error_status_description(st))
+                    publish_skipped(job["repo"], job["pr"], job, st)
                     qdb.mark(con, raw_id, "error", error_class=st, last_error=st)
                     _metrics(job, {"kind": "error", "error_class": st})
                     cleanup_case(job)
@@ -707,13 +788,11 @@ def main_loop():
                 cleanup_case(job)
                 continue
             # retries épuisés : schedule_retry a marqué 'error' ; publier + métriques
-            publish_status_safe(job["repo"], job["pr"], job, "error",
-                                error_status_description("TIMEOUT"))
+            publish_skipped(job["repo"], job["pr"], job, "TIMEOUT")
             _metrics(job, {"kind": "error", "error_class": "TIMEOUT", "last_error": "review timeout"})
         except Exception as e:
             log("job error", id=jid, err=str(e)[-400:])
-            publish_status_safe(job["repo"], job["pr"], job, "error",
-                                error_status_description("INTERNAL_ERROR"))
+            publish_skipped(job["repo"], job["pr"], job, "INTERNAL_ERROR", type(e).__name__)
             qdb.mark(con, raw_id, "error", error_class="INTERNAL_ERROR", last_error=str(e)[-400:])
             _metrics(job, {"kind": "error", "error_class": "INTERNAL_ERROR", "last_error": str(e)[-400:]})
         finally:
