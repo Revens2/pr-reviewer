@@ -169,12 +169,13 @@ class TestMapping(unittest.TestCase):
         self.assertEqual(wk.verdict_status({"status": "REVIEW_UNAVAILABLE", "model_certified": False}), "REVIEW_UNAVAILABLE")
 
     def test_status_for_verdict(self):
-        # commit status : jamais success sans certification
+        # commit status : PASS non certifié → SKIPPED_STATE (advisory) ; BLOCK non certifié → error
         self.assertEqual(wk.status_for_verdict({"status": "PASS", "model_certified": True})[0], "success")
         self.assertEqual(wk.status_for_verdict({"status": "BLOCK", "model_certified": True})[0], "failure")
         self.assertEqual(wk.status_for_verdict({"status": "PASS", "model_certified": False})[0], wk.SKIPPED_STATE)
         self.assertTrue(wk.status_for_verdict({"status": "PASS", "model_certified": False})[1].startswith("SKIPPED"))
         self.assertEqual(wk.status_for_verdict({"status": "REVIEW_UNAVAILABLE", "model_certified": False})[0], wk.SKIPPED_STATE)
+        self.assertEqual(wk.status_for_verdict({"status": "BLOCK", "model_certified": False})[0], "error")
 
 
 class TestPoller(unittest.TestCase):

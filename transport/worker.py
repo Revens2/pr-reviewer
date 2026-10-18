@@ -464,7 +464,9 @@ def verdict_status(verdict):
 
 def status_for_verdict(verdict):
     """Mapping verdict → commit status (state, description). Politique : jamais un
-    success-PASS si le verdict n'est pas certifié ; REVIEW_UNAVAILABLE → SKIPPED explicite."""
+    success-PASS si le verdict n'est pas certifié ; BLOCK non certifié → error ;
+    panne/REVIEW_UNAVAILABLE → SKIPPED explicite (SKIPPED_STATE, advisory : une panne
+    de l'infra de revue ne doit pas bloquer l'auto-merge)."""
     status = verdict.get("status")
     cert = bool(verdict.get("model_certified"))
     used = (verdict.get("model_verified") or "").split("/")[-1] or "Muse"
@@ -472,6 +474,9 @@ def status_for_verdict(verdict):
         return "success", f"PASS — review certifiée {used}"
     if status == "BLOCK" and cert:
         return "failure", f"BLOCK — review certifiée {used}"
+    if status == "BLOCK":
+        # BLOCK non certifié : jamais vert, même si SKIPPED_STATE vaut success.
+        return "error", error_status_description(verdict.get("error_class") or "MODEL_UNVERIFIED")
     return SKIPPED_STATE, error_status_description(verdict.get("error_class") or "MODEL_UNVERIFIED")
 
 
