@@ -27,10 +27,58 @@ sys.path.insert(0, str(HERE))
 import envfile
 envfile.load()
 import db as qdb
+import opencode_engine
 import github_client as gh
 
 CFG = json.loads(os.environ.get("TRANSPORT_CONFIG") or
                  pathlib.Path(HERE / "config.json").read_text())
+# Libelle affiche par la TUI freebuff pour le modele courant. Il ne se deduit
+# PAS de model_requested : l identifiant vaut z-ai/glm-5.3-flash quand l ecran
+# affiche GLM 5.3 Flash. Les deux vivent donc dans config.json.
+# Pourquoi ce reglage existe : freebuff a migre son modele par defaut le
+# 2026-09-05 (muse-spark -> glm-5.3-flash). Le libelle etait code en dur plus
+# bas ; le header de session ne matchait plus, et chaque review tournait 120 s
+# dans le vide avant de sortir en TIMEOUT_SESSION, sans jamais rien publier.
+# A la prochaine migration, seules ces deux valeurs changent.
+# "opencode" : review via opencode serve (muse-spark-1.3-contributor-free) ;
+# "freebuff" : ancienne TUI dans fb-vps.
+ENGINE = CFG.get("engine", "freebuff")
+MODEL_LABEL = CFG.get("model_label", "Muse Spark")
+# .get() et pas CFG[...] : les suites de tests injectent un TRANSPORT_CONFIG
+# minimal (parfois juste db_path). Une lecture obligatoire ici plante a l
+# import et casse tout le hors-ligne, y compris la CI.
+MODEL_REQUESTED = CFG.get("model_requested", "meta/muse-spark-1.3-contributor")
+MODEL_RE = re.escape(MODEL_LABEL)
+# Nom de l agent attendu par la sonde de certification (voir model_probe.sh).
+AGENT_EXPECTED = CFG.get("agent_expected", "muse-spark")
+if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", AGENT_EXPECTED):
+    raise SystemExit("agent_expected invalide : %r" % AGENT_EXPECTED)
+
+# docker_exec construit ses commandes en shell=True, et model_requested est
+# interpole dans cette chaine (boot_freebuff). Rendre ce champ configurable a
+# elargi ce vecteur : on le referme ici plutot que de refactorer docker_exec.
+# Un identifiant freebuff s ecrit vendeur/modele, sans metacaractere shell.
+# Tout le reste est refuse au demarrage, bruyamment.
+_MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*")
+if not _MODEL_ID.fullmatch(MODEL_REQUESTED):
+    raise SystemExit(
+        "model_requested invalide : %r. Format attendu vendeur/modele, "
+        "caracteres [A-Za-z0-9._-] uniquement." % MODEL_REQUESTED)
+# Chaîne de repli (opencode) : primaire puis model_fallbacks, mêmes règles de format.
+MODEL_FALLBACKS = [m for m in CFG.get("model_fallbacks", []) if m != MODEL_REQUESTED]
+for _m in MODEL_FALLBACKS:
+    if not _MODEL_ID.fullmatch(_m):
+        raise SystemExit("model_fallbacks invalide : %r" % _m)
+MODEL_CHAIN = [MODEL_REQUESTED] + MODEL_FALLBACKS
+# Panne technique (modèles saturés/morts, timeout, bug) : l'API commit status n'a
+# pas d'état "neutral" (check-runs exige une GitHub App, le transport utilise un
+# PAT). On publie donc un statut explicitement "SKIPPED — <raison>" dont l'état
+# GitHub est configurable (défaut success = non bloquant ; "error" = ancien
+# comportement fail-closed). Jamais confondu avec un PASS : description distincte.
+SKIPPED_STATE = CFG.get("skipped_state", "error")  # fail-closed ; "success" = mode advisory opt-in
+if SKIPPED_STATE not in ("success", "error", "failure", "pending"):
+    raise SystemExit("skipped_state invalide : %r" % SKIPPED_STATE)
+MAX_PATCH_BYTES = int(CFG.get("max_patch_bytes", 200000))
 STATE = pathlib.Path(CFG["db_path"]).parent
 METRICS_DIR = STATE / "metrics"
 METRICS_DIR.mkdir(parents=True, exist_ok=True)
@@ -64,6 +112,8 @@ def heartbeat():
 
 def sh(cmd, timeout=60, input_text=None, check=False):
     """Exécute localement (docker CLI via boundary durcie). Retourne (rc, stdout, stderr)."""
+    # moteur freebuff historique : cmd construit en interne, model id validé (_MODEL_ID).
+    # nosemgrep: python.lang.security.audit.subprocess-shell-true.subprocess-shell-true
     p = subprocess.run(cmd, shell=True, capture_output=True, text=True,
                        timeout=timeout, input=input_text)
     if check and p.returncode != 0:
@@ -119,7 +169,7 @@ def parse_balance(text):
         except ValueError:
             fb = None
     minutes = None
-    m = re.search(r"Muse Spark[^\n]*?(\d+)\s*(m|h)\s+left", text, re.IGNORECASE)
+    m = re.search(rf"{MODEL_RE}[^\n]*?(\d+)\s*(m|h)\s+left", text, re.IGNORECASE)
     if m:
         try:
             minutes = int(m.group(1)) * (60 if m.group(2) == "h" else 1)
@@ -168,11 +218,11 @@ def boot_freebuff(job):
     # preselect modèle Muse (settings persisté) puis tmux propre
     rc, out, err = docker_exec("bash -lc 'export TERM=xterm-256color; "
                                "CFG=$HOME/.config/manicode/settings.json; "
-                               "[ -f \"$CFG\" ] && grep -q muse-spark \"$CFG\" && "
+                               "[ -f \"$CFG\" ] && "
                                "jq --arg m \"%s\" \".freebuffModel=\\$m\" \"$CFG\" > \"$CFG.t\" && mv \"$CFG.t\" \"$CFG\"; "
                                "tmux kill-server 2>/dev/null; sleep 1; "
                                "tmux new-session -d -s fb -x 300 -y 55 freebuff; echo booted'"
-                               % CFG["model_requested"], timeout=60)
+                               % MODEL_REQUESTED, timeout=60)
     if rc != 0:
         raise RuntimeError(f"boot freebuff: {err[-300:]}")
     # attente état initial (bornée) ; auto-restart si une autre instance a pris
@@ -183,7 +233,7 @@ def boot_freebuff(job):
     while time.time() - t0 < 180:
         p = pane()
         state, fb = classify_freebucks(p)
-        if state == "EXHAUSTED" and not re.search(r"Muse Spark", p):
+        if state == "EXHAUSTED" and not re.search(rf"{MODEL_RE}", p):
             log("Freebucks épuisé au boot", freebucks=fb)
             return "FREEBUCKS_EXHAUSTED"
         fb_obs = store_balance(p)
@@ -253,7 +303,7 @@ def ensure_session(job):
             docker_exec("tmux send-keys -t fb Enter", timeout=30)
             time.sleep(6)
             continue
-        m = re.search(r"Muse Spark.*?(\d+)\s*(m|h).*?left", p)
+        m = re.search(rf"{MODEL_RE}.*?(\d+)\s*(m|h).*?left", p)
         if m:  # session Muse active (header)
             store_balance(p)
             if re.search(r"Enter a coding task or / for commands", p):
@@ -261,7 +311,7 @@ def ensure_session(job):
             time.sleep(3)
             continue
         # sélecteur : Enter pour démarrer la session Muse (pré-sélection settings)
-        if "Start coding for free" in p or re.search(r"›\s*Muse Spark", p) or "Choose a model" in p:
+        if "Start coding for free" in p or re.search(rf"›\s*{MODEL_RE}", p) or "Choose a model" in p:
             state, fb = classify_freebucks(p)
             if state == "EXHAUSTED":
                 log("Freebucks épuisé — pas de nouvelle session", freebucks=fb)
@@ -281,19 +331,29 @@ def ensure_session(job):
 # --- Publication GitHub -----------------------------------------------------
 
 def error_status_description(error_class):
-    """Description courte (<140) d'un échec technique → commit status error.
-    Un problème technique ne devient JAMAIS success."""
+    """Description courte (<140) d'un échec technique → statut SKIPPED explicite.
+    Un problème technique ne devient JAMAIS un PASS/BLOCK (description SKIPPED)."""
     return {
-        "AUTH_REQUIRED": "ERROR — authentification Freebuff requise (review non effectuée)",
-        "FREEBUCKS_EXHAUSTED": "ERROR — quota Freebucks épuisé (review non effectuée)",
-        "INSTANCE_BUSY": "ERROR — Freebuff occupée sur une autre instance",
-        "TIMEOUT": "ERROR — review Muse en timeout",
-        "TIMEOUT_SESSION": "ERROR — session Muse indisponible",
-        "TIMEOUT_BOOT": "ERROR — démarrage Freebuff impossible",
-        "MODEL_UNVERIFIED": "ERROR — modèle non vérifié (review non certifiée)",
-        "INTERNAL_ERROR": "ERROR — erreur technique interne",
-        "STALE_SHA": "ERROR — head SHA a changé pendant la review",
-    }.get(error_class, "ERROR — review non certifiée / indisponible")
+        "AUTH_REQUIRED": "SKIPPED — authentification Freebuff requise (review non effectuée)",
+        "FREEBUCKS_EXHAUSTED": "SKIPPED — quota Freebucks épuisé (review non effectuée)",
+        "INSTANCE_BUSY": "SKIPPED — Freebuff occupée sur une autre instance",
+        "TIMEOUT": "SKIPPED — modèles en timeout (review non effectuée)",
+        "TIMEOUT_SESSION": "SKIPPED — session Muse indisponible",
+        "TIMEOUT_BOOT": "SKIPPED — démarrage Freebuff impossible",
+        "MODEL_UNVERIFIED": "SKIPPED — modèle non vérifié (review non certifiée)",
+        "MODELS_SATURATED": "SKIPPED — modèles saturés (503/429)",
+        "MODELS_UNAVAILABLE": "SKIPPED — aucun modèle disponible",
+        "INTERNAL_ERROR": "SKIPPED — erreur technique interne",
+        "STALE_SHA": "SKIPPED — head SHA a changé pendant la review",
+    }.get(error_class, "SKIPPED — review non certifiée / indisponible")
+
+
+def publish_skipped(repo, pr, job, error_class, reason=""):
+    """Statut explicite non-verdict pour toute panne technique (voir SKIPPED_STATE)."""
+    desc = error_status_description(error_class)
+    if reason:
+        desc = f"{desc} : {reason}"
+    return publish_status_safe(repo, pr, job, SKIPPED_STATE, desc[:139])
 
 
 def publish_status_safe(repo, pr, job, state, description):
@@ -382,7 +442,8 @@ def run_probe(jobid, out_root):
     if rc != 0:
         log("probe install failed", err=err[-200:])
         return {}
-    docker_exec("bash /reviewer/out/probe-run-%s.sh /reviewer/out/evidence-%s" % (jobid, jobid), timeout=60)
+    docker_exec("bash -c 'FB_MODEL_TARGET=%s FB_AGENT_EXPECTED=%s bash /reviewer/out/probe-run-%s.sh /reviewer/out/evidence-%s'"
+                % (MODEL_REQUESTED, AGENT_EXPECTED, jobid, jobid), timeout=60)
     rc, raw, _ = docker_exec("cat /reviewer/out/evidence-%s/model.json 2>/dev/null" % jobid, timeout=30)
     try:
         return json.loads(raw)
@@ -403,14 +464,20 @@ def verdict_status(verdict):
 
 def status_for_verdict(verdict):
     """Mapping verdict → commit status (state, description). Politique : jamais un
-    success si le verdict n'est pas certifié ; REVIEW_UNAVAILABLE → error explicite."""
+    success-PASS si le verdict n'est pas certifié ; BLOCK non certifié → error ;
+    panne/REVIEW_UNAVAILABLE → SKIPPED explicite (SKIPPED_STATE, advisory : une panne
+    de l'infra de revue ne doit pas bloquer l'auto-merge)."""
     status = verdict.get("status")
     cert = bool(verdict.get("model_certified"))
+    used = (verdict.get("model_verified") or "").split("/")[-1] or "Muse"
     if status == "PASS" and cert:
-        return "success", "PASS — review certifiée Muse"
+        return "success", f"PASS — review certifiée {used}"
     if status == "BLOCK" and cert:
-        return "failure", "BLOCK — review certifiée Muse"
-    return "error", error_status_description(verdict.get("error_class") or "MODEL_UNVERIFIED")
+        return "failure", f"BLOCK — review certifiée {used}"
+    if status == "BLOCK":
+        # BLOCK non certifié : jamais vert, même si SKIPPED_STATE vaut success.
+        return "error", error_status_description(verdict.get("error_class") or "MODEL_UNVERIFIED")
+    return SKIPPED_STATE, error_status_description(verdict.get("error_class") or "MODEL_UNVERIFIED")
 
 
 def publish_check(repo, pr, job, verdict, out_root):
@@ -423,10 +490,13 @@ def publish_check(repo, pr, job, verdict, out_root):
     cert = bool(verdict.get("model_certified"))
     n = len(verdict.get("findings", []))
     st, desc = status_for_verdict(verdict)
-    suffix = f" — {n} finding(s) (head {job['head_sha'][:12]})" if st != "error" else ""
+    real = cert and status in ("PASS", "BLOCK")
+    suffix = f" — {n} finding(s) (head {job['head_sha'][:12]})" if real else ""
+    if real and verdict.get("diff_truncated"):
+        suffix += " [diff tronqué]"
     try:
         gh.create_status(repo, job["head_sha"], st, CFG["check_name"],
-                         f"{desc}{suffix}")
+                         f"{desc}{suffix}"[:139])
     except RuntimeError as e:
         log("commit status publish failed", err=str(e)[-300:])
     # commentaire synthèse seulement si BLOCK ou findings bloquants
@@ -537,6 +607,32 @@ def _metrics(job, action):
 
 # --- Snapshot / cleanup ------------------------------------------------------
 
+def truncate_patch(patch, max_bytes):
+    """Diff trop gros → garde les fichiers entiers dans l'ordre tant que le budget
+    le permet (le premier est coupé s'il dépasse seul). Retourne (patch, omis)."""
+    if max_bytes <= 0 or len(patch.encode()) <= max_bytes:
+        return patch, []
+    chunks = re.split(r"(?m)^(?=diff --git )", patch)
+    kept, omitted, used = [], [], 0
+    for c in chunks:
+        if not c:
+            continue
+        size = len(c.encode())
+        m = re.match(r"diff --git a/\S+ b/(\S+)", c)
+        name = m.group(1) if m else "?"
+        if used + size <= max_bytes:
+            kept.append(c)
+            used += size
+        elif not kept:
+            kept.append(c.encode()[:max_bytes].decode("utf-8", "ignore") + "\n[... fichier tronqué ...]\n")
+            used = max_bytes
+        else:
+            omitted.append(name)
+    head = (f"# NOTE pr-reviewer : diff tronqué à {max_bytes} octets ; "
+            f"{len(omitted)} fichier(s) omis (voir context.json diff_omitted_files)\n")
+    return head + "".join(kept), omitted
+
+
 def snapshot_job(job, out_root):
     """Construit repository/ (head) + change.patch + context.json sous input_bind_root/<jid>.
     Retourne le chemin du cas (vu hôte)."""
@@ -561,10 +657,13 @@ def snapshot_job(job, out_root):
     subprocess.run(["tar", "xzf", str(tar), "-C", str(repo_dir), "--strip-components=1"], check=True)
     tar.unlink()
     cmp = gh.get_compare(job["repo"], job["base_sha"], job["head_sha"])
-    (case / "change.patch").write_text(cmp["patch"] or "(empty diff)")
+    patch, omitted = truncate_patch(cmp["patch"] or "", MAX_PATCH_BYTES)
+    (case / "change.patch").write_text(patch or "(empty diff)")
     ctx = {"repository": job["repo"], "pull_request": job["pr"], "base_sha": job["base_sha"],
            "head_sha": job["head_sha"], "title": job["title"], "files_changed": cmp["files"],
-           "diff_truncated": cmp["truncated"]}
+           "diff_truncated": bool(cmp["truncated"] or patch != (cmp["patch"] or "")),
+           "diff_omitted_files": omitted,
+           "diff_bytes_total": len((cmp["patch"] or "").encode())}
     (case / "context.json").write_text(json.dumps(ctx, indent=2))
     subprocess.run(["chmod", "-R", "a-w", str(repo_dir)], check=False)
     return case
@@ -613,31 +712,66 @@ def main_loop():
                 continue
             # pending visible dès le claim
             publish_pending(job["repo"], job["pr"], job)
-            snapshot_job(job, out_root)
-            st = ensure_session(job)
-            if st != "ok":
-                log("session état fail-closed", state=st)
-                retryable = st in ("INSTANCE_BUSY", "TIMEOUT_SESSION", "TIMEOUT_BOOT")
-                if retryable and qdb.schedule_retry(con, raw_id, st, st, CFG["max_retries"]):
+            case = snapshot_job(job, out_root)
+            if ENGINE == "opencode":
+                log("review opencode", chain=MODEL_CHAIN)
+                try:
+                    verdict, model, transcript = opencode_engine.review(
+                        job, case, MODEL_CHAIN, CFG.get("attempt_timeout_s", 600),
+                        attempts_per_model=CFG.get("attempts_per_model", 2),
+                        budget_s=CFG.get("review_budget_s", CFG.get("timeout_s", 1800)),
+                        backoff_base_s=CFG.get("backoff_base_s", 15))
+                except opencode_engine.ReviewUnavailable as ru:
+                    log("review indisponible", id=jid, error_class=ru.error_class,
+                        attempts=[f"{a['model'].split('/')[-1]}:{a['outcome']}:{a['s']}s" for a in ru.attempts])
+                    (out_root / "attempts.json").write_text(json.dumps(ru.attempts, indent=2))
+                    if ru.transient and qdb.schedule_retry(con, raw_id, ru.error_class, ru.reason,
+                                                           CFG.get("unavailable_job_retries", 1),
+                                                           base_delay=CFG.get("unavailable_retry_delay_s", 600)):
+                        publish_status_safe(job["repo"], job["pr"], job, "pending",
+                                            "Muse review : modèles saturés, nouvel essai planifié")
+                        cleanup_case(job)
+                        continue
+                    publish_skipped(job["repo"], job["pr"], job, ru.error_class)
+                    qdb.mark(con, raw_id, "error", error_class=ru.error_class, last_error=ru.reason)
+                    _metrics(job, {"kind": "error", "error_class": ru.error_class, "last_error": ru.reason})
                     cleanup_case(job)
                     continue
-                if st == "FREEBUCKS_EXHAUSTED":
-                    publish_status_safe(job["repo"], job["pr"], job, "error",
-                                        error_status_description("FREEBUCKS_EXHAUSTED"))
-                qdb.mark(con, raw_id, "error", error_class=st, last_error=st)
-                _metrics(job, {"kind": "error", "error_class": st})
-                cleanup_case(job)
-                continue
-            log("prompt envoi")
-            send_prompt(jid, job["repo"], job["pr"], job["base_sha"], job["head_sha"])
-            verdict = wait_result(job, CFG.get("timeout_s", 1200), out_root, out_root / "wait.log")
-            (out_root / "result.json").write_text(json.dumps(verdict, indent=2))
-            capture_transcript(jid, out_root / "transcript.txt")
-            (out_root / "prompt.txt").write_text(PROMPT_TEMPLATE.format(
-                jobid=jid, repo=job["repo"], pr=job["pr"], base=job["base_sha"], head=job["head_sha"]))
-            model = run_probe(jid, out_root)
-            if model:
+                log("review ok", id=jid, model_used=model.get("model_used"),
+                    attempts=[f"{a['model'].split('/')[-1]}:{a['outcome']}:{a['s']}s" for a in model.get("attempts", [])])
+                try:
+                    verdict["diff_truncated"] = bool(json.loads((case / "context.json").read_text()).get("diff_truncated"))
+                except Exception:
+                    pass
+                (out_root / "result.json").write_text(json.dumps(verdict, indent=2))
+                (out_root / "transcript.txt").write_text(transcript)
                 (out_root / "model.json").write_text(json.dumps(model, indent=2))
+            else:
+                st = ensure_session(job)
+                if st != "ok":
+                    log("session état fail-closed", state=st)
+                    retryable = st in ("INSTANCE_BUSY", "TIMEOUT_SESSION", "TIMEOUT_BOOT")
+                    if retryable and qdb.schedule_retry(con, raw_id, st, st, CFG["max_retries"]):
+                        cleanup_case(job)
+                        continue
+                    # Retries epuises (ou etat non retryable) : le pending publie au
+                    # claim resterait affiche indefiniment sur la PR. Tout etat
+                    # fail-closed terminal doit devenir un commit status error.
+                    publish_skipped(job["repo"], job["pr"], job, st)
+                    qdb.mark(con, raw_id, "error", error_class=st, last_error=st)
+                    _metrics(job, {"kind": "error", "error_class": st})
+                    cleanup_case(job)
+                    continue
+                log("prompt envoi")
+                send_prompt(jid, job["repo"], job["pr"], job["base_sha"], job["head_sha"])
+                verdict = wait_result(job, CFG.get("timeout_s", 1200), out_root, out_root / "wait.log")
+                (out_root / "result.json").write_text(json.dumps(verdict, indent=2))
+                capture_transcript(jid, out_root / "transcript.txt")
+                (out_root / "prompt.txt").write_text(PROMPT_TEMPLATE.format(
+                    jobid=jid, repo=job["repo"], pr=job["pr"], base=job["base_sha"], head=job["head_sha"]))
+                model = run_probe(jid, out_root)
+                if model:
+                    (out_root / "model.json").write_text(json.dumps(model, indent=2))
             verdict["model_requested"] = CFG["model_requested"]
             verdict["model_certified"] = bool(model.get("certified"))
             verdict["model_verified"] = model.get("model_observed")
@@ -659,13 +793,11 @@ def main_loop():
                 cleanup_case(job)
                 continue
             # retries épuisés : schedule_retry a marqué 'error' ; publier + métriques
-            publish_status_safe(job["repo"], job["pr"], job, "error",
-                                error_status_description("TIMEOUT"))
+            publish_skipped(job["repo"], job["pr"], job, "TIMEOUT")
             _metrics(job, {"kind": "error", "error_class": "TIMEOUT", "last_error": "review timeout"})
         except Exception as e:
             log("job error", id=jid, err=str(e)[-400:])
-            publish_status_safe(job["repo"], job["pr"], job, "error",
-                                error_status_description("INTERNAL_ERROR"))
+            publish_skipped(job["repo"], job["pr"], job, "INTERNAL_ERROR", type(e).__name__)
             qdb.mark(con, raw_id, "error", error_class="INTERNAL_ERROR", last_error=str(e)[-400:])
             _metrics(job, {"kind": "error", "error_class": "INTERNAL_ERROR", "last_error": str(e)[-400:]})
         finally:

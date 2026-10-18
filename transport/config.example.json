@@ -10,15 +10,45 @@
   "auth_volume": "fb-vps-auth",
   "state_volume": "fb-vps-state",
   "out_volume": "fb-vps-output",
-  "model_requested": "meta/muse-spark-1.3-contributor",
-  "events": ["opened", "reopened", "ready_for_review", "synchronize"],
-  "repos": ["Revens2/pr-reviewer", "Revens2/homelab-ops"],
+  "model_requested": "opencode/mimo-v2.6-flash-free",
+  "events": [
+    "opened",
+    "reopened",
+    "ready_for_review",
+    "synchronize"
+  ],
+  "repos": [
+    "Revens2/pr-reviewer",
+    "Revens2/homelab-ops"
+  ],
   "draft_repos": [],
-  "author_associations": ["OWNER", "MEMBER", "COLLABORATOR"],
+  "author_associations": [
+    "OWNER",
+    "MEMBER",
+    "COLLABORATOR"
+  ],
   "pr_branch_prefixes": [],
   "max_retries": 3,
   "timeout_s": 1200,
   "poll_interval_s": 45,
   "freebucks_low": 10,
-  "check_name": "Muse Semantic Review"
+  "check_name": "Muse Semantic Review",
+  "engine": "opencode",
+  "model_fallbacks": [
+    "opencode/longcat-2.5-preview-free",
+    "opencode/big-pickle",
+    "opencode/glm-5.3-flash-free",
+    "opencode/deepseek-v4.1-flash-free",
+    "opencode/nemotron-3-ultra-free"
+  ],
+  "attempt_timeout_s": 600,
+  "review_budget_s": 1800,
+  "attempts_per_model": 2,
+  "backoff_base_s": 15,
+  "unavailable_job_retries": 1,
+  "unavailable_retry_delay_s": 600,
+  "max_patch_bytes": 200000,
+  "skipped_state": "error",
+  "_doc_skipped_state": "error = fail-closed (défaut). Mettre \"success\" seulement si Muse Semantic Review n'est PAS un check requis (mode advisory : une panne de l'infra de revue ne bloque pas l'auto-merge). Un BLOCK non certifié publie toujours error.",
+  "_doc_models": "Chaîne de repli opencode : model_requested puis model_fallbacks (vérifier les ids avec `opencode models`). 503/429/timeout → retry backoff puis modèle suivant ; modèle introuvable/sans crédit → suivant. Échec total → statut 'SKIPPED — raison' (état GitHub = skipped_state ; l'API commit status n'a pas de 'neutral')."
 }

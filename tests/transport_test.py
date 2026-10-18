@@ -169,11 +169,13 @@ class TestMapping(unittest.TestCase):
         self.assertEqual(wk.verdict_status({"status": "REVIEW_UNAVAILABLE", "model_certified": False}), "REVIEW_UNAVAILABLE")
 
     def test_status_for_verdict(self):
-        # commit status : jamais success sans certification
+        # commit status : PASS non certifié → SKIPPED_STATE (advisory) ; BLOCK non certifié → error
         self.assertEqual(wk.status_for_verdict({"status": "PASS", "model_certified": True})[0], "success")
         self.assertEqual(wk.status_for_verdict({"status": "BLOCK", "model_certified": True})[0], "failure")
-        self.assertEqual(wk.status_for_verdict({"status": "PASS", "model_certified": False})[0], "error")
-        self.assertEqual(wk.status_for_verdict({"status": "REVIEW_UNAVAILABLE", "model_certified": False})[0], "error")
+        self.assertEqual(wk.status_for_verdict({"status": "PASS", "model_certified": False})[0], wk.SKIPPED_STATE)
+        self.assertTrue(wk.status_for_verdict({"status": "PASS", "model_certified": False})[1].startswith("SKIPPED"))
+        self.assertEqual(wk.status_for_verdict({"status": "REVIEW_UNAVAILABLE", "model_certified": False})[0], wk.SKIPPED_STATE)
+        self.assertEqual(wk.status_for_verdict({"status": "BLOCK", "model_certified": False})[0], "error")
 
 
 class TestPoller(unittest.TestCase):
@@ -436,7 +438,7 @@ class TestFreebucks(unittest.TestCase):
         from worker import error_status_description
         for cls in ("AUTH_REQUIRED", "FREEBUCKS_EXHAUSTED", "TIMEOUT",
                     "TIMEOUT_SESSION", "MODEL_UNVERIFIED", "INTERNAL_ERROR"):
-            self.assertTrue(error_status_description(cls).startswith("ERROR"))
+            self.assertTrue(error_status_description(cls).startswith("SKIPPED"))
 
 
 class TestReconcile(unittest.TestCase):
@@ -479,6 +481,64 @@ class TestReconcile(unittest.TestCase):
         self.wk.reconcile_running(self.con, get_head=boom)
         st = self.con.execute("SELECT state FROM jobs WHERE pr=3").fetchone()["state"]
         self.assertEqual(st, "pending")
+
+
+class TestOpencodeFallback(unittest.TestCase):
+    """Chaîne de repli : 503 → retry/backoff puis modèle suivant ; modèle mort/sans crédit → suivant."""
+
+    def _run(self, script, models, **kw):
+        import opencode_engine as oe
+        calls = []
+        def fake_attempt(job, case, model, prompt, timeout_s):
+            calls.append(model)
+            r = script[model].pop(0)
+            if isinstance(r, Exception):
+                raise r
+            return {"head_sha": job["head_sha"], "status": "PASS", "findings": []}, \
+                   {"observed": model, "session": "s", "message": "m"}, "{}"
+        orig, oe._attempt = oe._attempt, fake_attempt
+        orig_dir = oe.REVIEWER_DIR
+        d = pathlib.Path(tempfile.mkdtemp()); (d / "AGENTS.md").write_text("skill")
+        oe.REVIEWER_DIR = d
+        try:
+            return oe, calls, oe.review({"repo": "r", "pr": 1, "head_sha": "h", "base_sha": "b"}, d,
+                                        models, 60, sleep=lambda s: None, **kw)
+        finally:
+            oe._attempt, oe.REVIEWER_DIR = orig, orig_dir
+
+    def test_503_then_fallback(self):
+        oe, calls, (v, ev, _) = self._run({
+            "o/a": [RuntimeError("[503] Service temporarily overloaded")] * 2,
+            "o/b": [RuntimeError("Insufficient account funds")],
+            "o/c": ["ok"]}, ["o/a", "o/b", "o/c"], budget_s=3600)
+        self.assertEqual(calls, ["o/a", "o/a", "o/b", "o/c"])
+        self.assertEqual(ev["model_used"], "o/c")
+        self.assertTrue(ev["certified"])
+        self.assertEqual(ev["state"], "FALLBACK_OK")
+
+    def test_all_dead_raises_unavailable(self):
+        import opencode_engine as oe
+        with self.assertRaises(oe.ReviewUnavailable) as cm:
+            self._run({"o/a": [RuntimeError("Model not found: o/a")],
+                       "o/b": [RuntimeError("[429] rate limit")] * 2}, ["o/a", "o/b"], budget_s=3600)
+        self.assertEqual(cm.exception.error_class, "MODELS_SATURATED")
+        self.assertTrue(cm.exception.transient)
+
+    def test_classify(self):
+        import opencode_engine as oe
+        self.assertEqual(oe.classify("Streaming response failed: [503] Upstream error from Nvidia: Service temporarily overloaded"), "transient")
+        self.assertEqual(oe.classify("Insufficient account funds"), "dead")
+        self.assertEqual(oe.classify("opencode serve HTTP 500: Unexpected server error"), "dead")
+
+
+class TestTruncatePatch(unittest.TestCase):
+    def test_truncates_by_file(self):
+        p = "".join(f"diff --git a/f{i} b/f{i}\n" + "+x\n" * 100 for i in range(10))
+        out, omitted = wk.truncate_patch(p, 1000)
+        self.assertLessEqual(len(out.encode()), 1200)
+        self.assertTrue(omitted)
+        self.assertIn("diff --git a/f0 b/f0", out)
+        self.assertEqual(wk.truncate_patch("small", 1000), ("small", []))
 
 
 if __name__ == "__main__":
