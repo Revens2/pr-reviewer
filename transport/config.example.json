@@ -48,6 +48,7 @@
   "unavailable_job_retries": 1,
   "unavailable_retry_delay_s": 600,
   "max_patch_bytes": 200000,
-  "skipped_state": "success",
+  "skipped_state": "error",
+  "_doc_skipped_state": "error = fail-closed (défaut). Mettre \"success\" seulement si Muse Semantic Review n'est PAS un check requis (mode advisory : une panne de l'infra de revue ne bloque pas l'auto-merge). Un BLOCK non certifié publie toujours error.",
   "_doc_models": "Chaîne de repli opencode : model_requested puis model_fallbacks (vérifier les ids avec `opencode models`). 503/429/timeout → retry backoff puis modèle suivant ; modèle introuvable/sans crédit → suivant. Échec total → statut 'SKIPPED — raison' (état GitHub = skipped_state ; l'API commit status n'a pas de 'neutral')."
 }

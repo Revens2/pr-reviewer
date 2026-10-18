@@ -75,7 +75,7 @@ MODEL_CHAIN = [MODEL_REQUESTED] + MODEL_FALLBACKS
 # PAT). On publie donc un statut explicitement "SKIPPED — <raison>" dont l'état
 # GitHub est configurable (défaut success = non bloquant ; "error" = ancien
 # comportement fail-closed). Jamais confondu avec un PASS : description distincte.
-SKIPPED_STATE = CFG.get("skipped_state", "success")
+SKIPPED_STATE = CFG.get("skipped_state", "error")  # fail-closed ; "success" = mode advisory opt-in
 if SKIPPED_STATE not in ("success", "error", "failure", "pending"):
     raise SystemExit("skipped_state invalide : %r" % SKIPPED_STATE)
 MAX_PATCH_BYTES = int(CFG.get("max_patch_bytes", 200000))
